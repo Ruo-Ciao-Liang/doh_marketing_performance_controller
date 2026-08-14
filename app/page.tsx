@@ -23,6 +23,8 @@ import { importChunkRanges, parseImportApiPayload } from "@/lib/import-client";
 import { comparableSnapshot, comparisonTargetDate, percentageChange } from "@/lib/kpi-comparison";
 import { comparableMetrics, rankComparisonRows, type ComparableMetricKey, type MarketplaceComparisonRow } from "@/lib/marketplace-comparison";
 import { marketplaceRegistry, type MarketplaceId, type MarketplaceSelection } from "@/lib/marketplaces";
+import { parseProductMasterFile, type CatalogProduct, type ProductMasterStats } from "@/lib/product-master-import";
+import { parseAllegroFiles, type AllegroSnapshot } from "@/lib/allegro-import";
 import { createTabularWorkbook } from "@/lib/review-export";
 import type { MergedAdvertisingRange } from "@/lib/advertising-range";
 import {
@@ -74,6 +76,9 @@ const integer = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 });
 const decimal = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 2 });
 const pct = (value: number | null | undefined, digits = 1) => value == null ? "—" : `${(value * 100).toFixed(digits)}%`;
 const euro = (value: number | null | undefined, cents = false) => value == null ? "—" : cents ? money2.format(value) : money.format(value);
+const zloty = new Intl.NumberFormat("en-GB", { style: "currency", currency: "PLN", maximumFractionDigits: 0 });
+const zloty2 = new Intl.NumberFormat("en-GB", { style: "currency", currency: "PLN", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const pln = (value: number | null | undefined, cents = false) => value == null ? "—" : cents ? zloty2.format(value) : zloty.format(value);
 const displayDate = (value: string) => new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T12:00:00Z`));
 
 type DashboardData = {
@@ -224,7 +229,7 @@ function SaveIndicator({ status, label, detail }: { status: SaveStatus; label: s
     status === "saved" ? label :
     status === "conflict" ? "Updated by another user" :
     status === "error" ? "Could not save" : label;
-  return <>{label === "All changes saved" && <label className="marketplace-switcher"><span>Marketplace</span><select aria-label="Choose marketplace" value={marketplaceSelectionGlobal} onChange={(event) => changeMarketplaceGlobal(event.target.value as MarketplaceSelection)}><option value="amazon_de">Amazon DE</option><option value="kaufland_de">Kaufland DE</option><option value="all">All marketplaces</option></select></label>}<span className={`save-indicator ${status}`} title={detail}><i />{text}</span></>;
+  return <>{label === "All changes saved" && <label className="marketplace-switcher"><span>Marketplace</span><select aria-label="Choose marketplace" value={marketplaceSelectionGlobal} onChange={(event) => changeMarketplaceGlobal(event.target.value as MarketplaceSelection)}><option value="amazon_de">Amazon DE</option><option value="kaufland_de">Kaufland DE</option><option value="allegro_pl">Allegro PL</option><option value="all">All marketplaces</option></select></label>}<span className={`save-indicator ${status}`} title={detail}><i />{text}</span></>;
 }
 
 const summaryFromData = (currentData: DashboardData, id = "baseline-2026-07-20"): SnapshotHistorySummary => ({
@@ -272,6 +277,62 @@ function emptyMarketplaceData(marketplaceId: MarketplaceId): DashboardData {
     catalogProducts: initialData.catalogProducts,
     imports: initialData.imports.filter((item) => ["product_master", "amazon_listing", "economics"].includes(item.key)),
     quality: { activeProducts: initialData.products.length, retailCoverageProducts: 0, economicsCoverageProducts: initialData.quality.economicsCoverageProducts, netContributionCoverageProducts: 0, targets: 0, targetsMatchedToActiveProduct: 0, ambiguousTargetProductJoins: 0, excludedNonEuroAdvertisedRows: 0, duplicateProtection: "No reporting snapshot has been imported for this marketplace." },
+  };
+}
+
+// A user-uploaded product master is persisted client-side (no D1/R2 needed) so it
+// survives a reload and drives the catalog everywhere the dashboard renders products.
+const PRODUCT_MASTER_STORAGE_KEY = "mpc:product-master:v1";
+
+function loadStoredProductMaster(): { products: CatalogProduct[]; stats: ProductMasterStats } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(PRODUCT_MASTER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { products?: CatalogProduct[]; stats?: ProductMasterStats };
+    if (!parsed.products?.length || !parsed.stats) return null;
+    return { products: parsed.products, stats: parsed.stats };
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredProductMaster(products: CatalogProduct[], stats: ProductMasterStats) {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(PRODUCT_MASTER_STORAGE_KEY, JSON.stringify({ products, stats })); } catch { /* quota or private mode */ }
+}
+
+function clearStoredProductMaster() {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.removeItem(PRODUCT_MASTER_STORAGE_KEY); } catch { /* ignore */ }
+}
+
+// Replace the active catalog with an uploaded product master. Any retail/advertising
+// already present for a SKU is preserved; missing metrics stay null (never zeroed).
+function applyCatalogToData(base: DashboardData, catalog: CatalogProduct[]): DashboardData {
+  const bySku = new Map(base.products.map((product) => [product.sku, product]));
+  const products = catalog.map((entry) => {
+    const existing = bySku.get(entry.sku);
+    return {
+      ...entry,
+      retail: existing?.retail ?? null,
+      advertising: existing?.advertising ?? null,
+      advertisingStatus: existing?.advertising ? existing.advertisingStatus : entry.advertisingStatus,
+    } as unknown as Product;
+  });
+  return {
+    ...base,
+    catalogProducts: catalog as unknown as Product[],
+    products,
+    quality: {
+      ...base.quality,
+      activeProducts: products.length,
+      masterCatalogProducts: catalog.length,
+      masterCatalogEanProducts: catalog.filter((entry) => entry.ean).length,
+      economicsCoverageProducts: catalog.filter((entry) => entry.margin != null).length,
+      retailCoverageProducts: products.filter((product) => product.retail != null).length,
+      productMasterSource: "Uploaded product master",
+    },
   };
 }
 
@@ -1416,11 +1477,14 @@ function EmptyMarketplace({ marketplaceId, onOpenImports }: { marketplaceId: Mar
   return <section className="panel empty-marketplace marketplace-onboarding"><span className="eyebrow">{definition.name}</span><h1>No retained snapshot yet</h1><p>Import one complete {definition.shortName} reporting package. Missing metrics will remain explicitly unavailable; no Amazon values or zeros are substituted.</p><div><button type="button" className="primary-button" onClick={onOpenImports}>Open {definition.shortName} imports</button><a href="https://www.kauflandglobalmarketplace.com/en/seller-university/your-performance/reports/" target="_blank" rel="noreferrer">View Kaufland report guidance →</a></div></section>;
 }
 
-function Imports({ history, currentSummary, marketplaceId = marketplaceSelectionGlobal === "all" ? "kaufland_de" : marketplaceSelectionGlobal, onImported }: {
+function Imports({ history, currentSummary, marketplaceId = marketplaceSelectionGlobal === "all" ? "kaufland_de" : marketplaceSelectionGlobal, onImported, productMasterStats, onProductMaster, onClearProductMaster }: {
   history: SnapshotHistorySummary[];
   currentSummary: SnapshotHistorySummary;
   marketplaceId?: MarketplaceId;
   onImported: (snapshot: DashboardData, summary: SnapshotHistorySummary, history: SnapshotHistorySummary[]) => void;
+  productMasterStats: ProductMasterStats | null;
+  onProductMaster: (products: CatalogProduct[], stats: ProductMasterStats) => void;
+  onClearProductMaster: () => void;
 }) {
   const marketplace = marketplaceRegistry[marketplaceId];
   const requiredRequirements = marketplace.importRequirements.filter((item) => !item.optional);
@@ -1435,6 +1499,28 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
   const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
   const [mappingCount, setMappingCount] = useState(0);
   const [mappingFeedback, setMappingFeedback] = useState("");
+  const [masterDragging, setMasterDragging] = useState(false);
+  const [masterBusy, setMasterBusy] = useState(false);
+  const [masterFeedback, setMasterFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
+  const uploadProductMaster = async (file: File | undefined) => {
+    if (!file || masterBusy) return;
+    setMasterBusy(true);
+    setMasterFeedback({ tone: "warning", text: `Reading ${file.name}…` });
+    try {
+      const result = await parseProductMasterFile(file);
+      if (!result.products.length) {
+        setMasterFeedback({ tone: "error", text: result.warnings[0] ?? "No products could be read from this file." });
+        return;
+      }
+      onProductMaster(result.products, result.stats);
+      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setMasterFeedback({ tone: result.warnings.length ? "warning" : "success", text: `${integer.format(result.stats.products)} products loaded from ${file.name}. ${integer.format(result.stats.withMargin)} have a contribution margin and ${integer.format(result.stats.withEan)} carry an EAN.${warningText}` });
+    } catch (error) {
+      setMasterFeedback({ tone: "error", text: error instanceof Error ? error.message : "The product master could not be read." });
+    } finally {
+      setMasterBusy(false);
+    }
+  };
   const [commissionRate, setCommissionRate] = useState("");
   const [feeRevision, setFeeRevision] = useState(0);
   const [feeConfirmed, setFeeConfirmed] = useState(false);
@@ -1581,6 +1667,16 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
     : null;
   return <>
     <div className="page-heading"><div><span className="eyebrow">Persistent source history · {marketplace.name}</span><h1>Data imports</h1><p>{marketplaceId === "kaufland_de" ? "Upload the same seven-report package for July, a single day, or month-to-date. Every refresh is retained; newer overlapping daily evidence is used for flexible ranges without deleting the older snapshot." : `Upload one complete ${marketplace.shortName} reporting period. Every valid snapshot and its raw files are retained for MoM, YoY and marketplace comparisons.`}</p></div><StatusPill tone="ready">{history.length} retained snapshot{history.length === 1 ? "" : "s"}</StatusPill></div>
+    <section className="panel mapping-upload product-master-upload">
+      <div><span className="eyebrow">Bring your own catalog</span><h2>Product master upload</h2><p>Upload your own completed product master as <code>.xlsx</code> or <code>.csv</code> to drive the whole catalog — internal SKU, EAN, supplier, available price and cost. Contribution margin is derived from price and cost when a margin column is absent. Recognized headers include <code>Artikelnummer</code>/<code>SKU</code>, <code>EAN / GTIN</code>, <code>price</code>, <code>Letzter EK</code>, <code>Logistikkosten</code>, <code>Landed Cost</code> and <code>Firma / Lieferant</code>. The file is parsed and kept in your browser only — it is never sent to a server.</p></div>
+      <label className={`drop-zone compact ${masterDragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setMasterDragging(true); }} onDragOver={(event) => { event.preventDefault(); setMasterDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setMasterDragging(false); }} onDrop={(event) => { event.preventDefault(); setMasterDragging(false); void uploadProductMaster(event.dataTransfer.files?.[0]); }}>
+        <input type="file" accept=".xlsx,.csv,.tsv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={masterBusy} onChange={(event) => { void uploadProductMaster(event.target.files?.[0]); event.target.value = ""; }} />
+        <span className="drop-icon">⇧</span><strong>{masterBusy ? "Reading your product master…" : "Drop a product master (.xlsx or .csv)"}</strong><small>or click to choose a file · parsed and kept in your browser</small>
+      </label>
+      <div className="product-master-status"><StatusPill tone={productMasterStats ? "ready" : "quiet"}>{productMasterStats ? `${integer.format(productMasterStats.products)} products retained` : "Using the built-in demo catalog"}</StatusPill>{productMasterStats && <button type="button" className="text-button" onClick={onClearProductMaster}>Remove uploaded master</button>}</div>
+      {masterFeedback && <div className={`import-feedback ${masterFeedback.tone}`} role="status">{masterFeedback.text}</div>}
+      {productMasterStats && <p className="mapping-feedback">Source: {productMasterStats.fileName} · {productMasterStats.format.toUpperCase()} · {integer.format(productMasterStats.withMargin)} with margin · {integer.format(productMasterStats.withCost)} with cost · {integer.format(productMasterStats.withEan)} with EAN{productMasterStats.duplicateSkus ? ` · ${integer.format(productMasterStats.duplicateSkus)} duplicate SKUs ignored` : ""}</p>}
+    </section>
     {marketplaceId === "kaufland_de" && <section className="panel mapping-upload"><div><span className="eyebrow">Optional identity enrichment</span><h2>Internal SKU ↔ EAN crosswalk</h2><p>The Account listing feed automatically joins <code>id_offer</code> to matching internal SKUs. Upload a crosswalk only for the remaining unmatched Kaufland offers. Required columns: <code>internal_sku</code> and <code>ean</code>; conflicts still block import.</p></div><label className="secondary-button">Choose optional mapping CSV<input type="file" accept=".csv,text/csv" onChange={(event) => void uploadMapping(event.target.files?.[0])} /></label><StatusPill tone={mappingCount ? "ready" : "quiet"}>{mappingCount ? `${mappingCount} identifiers retained` : "Auto-match enabled"}</StatusPill>{mappingFeedback && <p className="mapping-feedback">{mappingFeedback}</p>}</section>}
     {marketplaceId === "kaufland_de" && <section className="panel marketplace-fees"><div><span className="eyebrow">Marketplace cost settings</span><h2>Kaufland commission / provision</h2><p>Purchase and delivery costs remain sourced from the locked economics workbook. Profitability stays unavailable until this marketplace rate is confirmed.</p></div><label><span>Commission rate</span><div><input type="number" min="0" max="50" step="0.1" value={commissionRate} onChange={(event) => setCommissionRate(event.target.value)} /><b>%</b></div></label><button type="button" className="primary-button" onClick={() => void saveFees()}>Save marketplace fee</button><StatusPill tone={feeConfirmed ? "ready" : "partial"}>{feeConfirmed ? "Confirmed" : "Not confirmed"}</StatusPill>{feeFeedback && <p>{feeFeedback}</p>}</section>}
     <section className="import-upload-layout">
@@ -2000,6 +2096,143 @@ function ReportingPeriodSelector({
   </div>;
 }
 
+// The Allegro workspace is fully client-side: the three Allegro workbooks are parsed
+// in the browser and the resulting PLN-native snapshot (plus the editable FX rate) is
+// persisted to localStorage so it survives a reload without any server storage.
+const ALLEGRO_STORAGE_KEY = "mpc:allegro:v1";
+const DEFAULT_PLN_EUR_RATE = 0.23;
+
+function loadStoredAllegro(): { snapshot: AllegroSnapshot; fxRate: number; fileNames: string[] } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ALLEGRO_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { snapshot?: AllegroSnapshot; fxRate?: number; fileNames?: string[] };
+    if (!parsed.snapshot) return null;
+    return { snapshot: parsed.snapshot, fxRate: parsed.fxRate ?? DEFAULT_PLN_EUR_RATE, fileNames: parsed.fileNames ?? [] };
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredAllegro(snapshot: AllegroSnapshot, fxRate: number, fileNames: string[]) {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(ALLEGRO_STORAGE_KEY, JSON.stringify({ snapshot, fxRate, fileNames })); } catch { /* quota */ }
+}
+
+function clearStoredAllegro() {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.removeItem(ALLEGRO_STORAGE_KEY); } catch { /* ignore */ }
+}
+
+type AllegroTab = "overview" | "campaigns" | "offers" | "products" | "import";
+
+function AllegroWorkspace() {
+  const stored = useMemo(() => loadStoredAllegro(), []);
+  const [snapshot, setSnapshot] = useState<AllegroSnapshot | null>(stored?.snapshot ?? null);
+  const [fxRate, setFxRate] = useState<number>(stored?.fxRate ?? DEFAULT_PLN_EUR_RATE);
+  const [fileNames, setFileNames] = useState<string[]>(stored?.fileNames ?? []);
+  const [tab, setTab] = useState<AllegroTab>(stored?.snapshot ? "overview" : "import");
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
+
+  const toEur = (value: number | null | undefined) => (value == null ? null : value * fxRate);
+  const money = (value: number | null | undefined) => <span className="allegro-money"><b>{pln(value, true)}</b><small>{euro(toEur(value), true)}</small></span>;
+
+  const setRate = (raw: string) => {
+    const value = Number(raw);
+    const next = Number.isFinite(value) && value > 0 ? value : fxRate;
+    setFxRate(Number(raw) === 0 ? 0 : next);
+    if (snapshot) saveStoredAllegro(snapshot, Number.isFinite(value) && value >= 0 ? value : fxRate, fileNames);
+  };
+
+  const importFiles = async (incoming: File[]) => {
+    const files = incoming.filter((file) => /\.(xlsx|csv)$/i.test(file.name));
+    if (!files.length) { setFeedback({ tone: "error", text: "Drop the Allegro .xlsx exports (or .csv)." }); return; }
+    setBusy(true);
+    setFeedback({ tone: "warning", text: `Reading ${files.length} file${files.length === 1 ? "" : "s"}…` });
+    try {
+      const result = await parseAllegroFiles(files);
+      if (!result.sources.length) { setFeedback({ tone: "error", text: "None of the files matched a known Allegro export layout." }); return; }
+      const names = files.map((file) => file.name);
+      setSnapshot(result);
+      setFileNames(names);
+      saveStoredAllegro(result, fxRate, names);
+      setTab("overview");
+      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `Imported ${result.sources.length} Allegro report${result.sources.length === 1 ? "" : "s"} covering ${result.periodStart ? displayDate(result.periodStart) : "?"} – ${result.periodEnd ? displayDate(result.periodEnd) : "?"}.${warningText}` });
+    } catch (error) {
+      setFeedback({ tone: "error", text: error instanceof Error ? error.message : "The Allegro files could not be read." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearAll = () => { setSnapshot(null); setFileNames([]); clearStoredAllegro(); setTab("import"); setFeedback(null); };
+
+  const importPanel = (
+    <section className="panel allegro-import-panel">
+      <div className="panel-heading"><div><span className="eyebrow">Allegro exports · PLN</span><h2>Import Allegro reports</h2><p>Drop the campaign statistics workbook, the offer/product summary, and (optionally) the traffic report. Files are parsed and kept in your browser — nothing is uploaded. Every figure is stored in PLN; EUR is derived with the rate above.</p></div></div>
+      <label className={`drop-zone ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void importFiles(Array.from(event.dataTransfer.files)); }}>
+        <input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" multiple disabled={busy} onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+        <span className="drop-icon">⇧</span><strong>{busy ? "Reading Allegro reports…" : "Drop Allegro .xlsx files here"}</strong><small>campaign statistics · offer/product summary · traffic report · or click to choose</small>
+      </label>
+      {feedback && <div className={`import-feedback ${feedback.tone}`} role="status">{feedback.text}</div>}
+      {snapshot && <div className="allegro-sources"><div className="allegro-sources-head"><StatusPill tone="ready">{snapshot.sources.length} report{snapshot.sources.length === 1 ? "" : "s"} loaded</StatusPill><button type="button" className="text-button" onClick={clearAll}>Remove Allegro data</button></div><div className="import-grid">{snapshot.sources.map((source, index) => <article className="import-card" key={`${source.key}-${index}`}><div className="file-icon">{source.fileName.toLowerCase().endsWith(".csv") ? "CSV" : "XLSX"}</div><div className="import-main"><div><h3>{source.label}</h3><StatusPill tone="ready">{integer.format(source.rows)} rows</StatusPill></div><p title={source.fileName}>{source.fileName}</p><dl><div><dt>System role</dt><dd>{source.key}</dd></div></dl></div></article>)}</div></div>}
+      <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.allegro_pl.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
+    </section>
+  );
+
+  const header = (
+    <div className="page-heading allegro-heading">
+      <div><span className="eyebrow">Polish marketplace · PLN with EUR{snapshot?.account ? ` · account ${snapshot.account}` : ""}</span><h1>Allegro PL control room</h1><p>{snapshot?.periodStart && snapshot?.periodEnd ? `Reconciled Allegro Ads and retail performance for ${displayDate(snapshot.periodStart)} – ${displayDate(snapshot.periodEnd)}${snapshot.days ? ` · ${snapshot.days} days` : ""}. All values are shown in złoty and converted to euro.` : "Upload the Allegro exports to see campaigns, offers and products in PLN and EUR."}</p></div>
+      <label className="allegro-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={fxRate} onChange={(event) => setRate(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>
+    </div>
+  );
+
+  if (!snapshot) return <>{header}{importPanel}</>;
+
+  const adv = snapshot.totals.advertising;
+  const retail = snapshot.totals.retail;
+  const tabs: { key: AllegroTab; label: string }[] = [
+    { key: "overview", label: "Overview" },
+    { key: "campaigns", label: `Campaigns · ${snapshot.campaigns.length}` },
+    { key: "offers", label: `Offers · ${snapshot.offers.length}` },
+    { key: "products", label: `Products · ${snapshot.products.length}` },
+    { key: "import", label: "Import" },
+  ];
+
+  return <>
+    {header}
+    <nav className="allegro-tabs">{tabs.map((item) => <button type="button" key={item.key} className={tab === item.key ? "active" : ""} onClick={() => setTab(item.key)}>{item.label}</button>)}</nav>
+
+    {tab === "overview" && <>
+      <section className="allegro-kpis">
+        <article><span>Ad spend (net)</span>{money(adv.spendNet)}</article>
+        <article><span>Ad sales (attributed)</span>{money(adv.sales)}</article>
+        <article><span>ACoS</span><span className="allegro-metric">{pct(adv.acos)}</span><small>{adv.roas == null ? "—" : `${adv.roas.toFixed(2)}× ROAS`}</small></article>
+        <article><span>TACoS (ad cost ÷ retail sales)</span><span className="allegro-metric">{pct(snapshot.totals.combined.tacos)}</span></article>
+        <article><span>Retail sales</span>{money(retail.sales)}</article>
+        <article><span>Retail transactions</span><span className="allegro-metric">{integer.format(retail.transactions)}</span><small>{integer.format(retail.unitsSold)} units sold</small></article>
+        <article><span>Impressions</span><span className="allegro-metric">{integer.format(adv.impressions)}</span><small>{integer.format(adv.clicks)} clicks · {pct(adv.ctr, 2)} CTR</small></article>
+        <article><span>Avg CPC (net)</span>{money(adv.cpcNet)}</article>
+        <article><span>Offer views</span><span className="allegro-metric">{integer.format(retail.views)}</span><small>{pct(retail.conversion, 2)} conversion</small></article>
+        <article><span>Added to cart</span><span className="allegro-metric">{integer.format(retail.addedToCart)}</span></article>
+      </section>
+      <p className="allegro-note">Advertising figures come from the Allegro Ads campaign export; retail figures from the offer summary. Ad-attributed sales can exceed offer-summary sales because they use Allegro's click-attribution window. Missing values are shown as “—”, never zero.</p>
+    </>}
+
+    {tab === "campaigns" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Campaign</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>CPC (net)</th><th>Spend (net)</th><th>Ad sales</th><th>ROAS</th></tr></thead><tbody>{snapshot.campaigns.map((campaign) => <tr key={campaign.name}><td><b>{campaign.name}</b></td><td>{integer.format(campaign.impressions)}</td><td>{integer.format(campaign.clicks)}</td><td>{pct(campaign.ctr, 2)}</td><td>{money(campaign.cpcNet)}</td><td>{money(campaign.spendNet)}</td><td>{money(campaign.sales)}</td><td>{campaign.roas == null ? "—" : `${campaign.roas.toFixed(2)}×`}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.campaigns.length} campaigns</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
+
+    {tab === "offers" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Offer</th><th>Offer ID</th><th>Retail sales</th><th>Avg price</th><th>Transactions</th><th>Units</th><th>Conversion</th><th>Views</th><th>Ad sales</th></tr></thead><tbody>{snapshot.offers.slice(0, 300).map((offer) => <tr key={offer.offerId || offer.name}><td><b>{offer.name || "—"}</b></td><td>{offer.offerId || "—"}</td><td>{money(offer.sales)}</td><td>{money(offer.avgPrice)}</td><td>{integer.format(offer.transactions)}</td><td>{integer.format(offer.unitsSold)}</td><td>{pct(offer.conversion, 2)}</td><td>{integer.format(offer.views)}</td><td>{offer.adSales ? money(offer.adSales) : "—"}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.offers.length} offers{snapshot.offers.length > 300 ? " (showing first 300)" : ""}</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
+
+    {tab === "products" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Product</th><th>Retail sales</th><th>Avg price</th><th>Min–Max price</th><th>Transactions</th><th>Units</th><th>Conversion</th><th>Views</th><th>Offers</th></tr></thead><tbody>{snapshot.products.slice(0, 300).map((product) => <tr key={product.productId || product.name}><td><b>{product.name || "—"}</b></td><td>{money(product.sales)}</td><td>{money(product.avgPrice)}</td><td>{product.minPrice == null && product.maxPrice == null ? "—" : `${pln(product.minPrice, true)} – ${pln(product.maxPrice, true)}`}</td><td>{integer.format(product.transactions)}</td><td>{integer.format(product.unitsSold)}</td><td>{pct(product.conversion, 2)}</td><td>{integer.format(product.views)}</td><td>{product.numberOfOffers == null ? "—" : integer.format(product.numberOfOffers)}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.products.length} products{snapshot.products.length > 300 ? " (showing first 300)" : ""}</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
+
+    {tab === "import" && importPanel}
+  </>;
+}
+
 export default function Home() {
   const [page, setPage] = useState<PageKey>("dashboard");
   const [marketplaceSelection, setMarketplaceSelection] = useState<MarketplaceSelection>("amazon_de");
@@ -2030,11 +2263,20 @@ export default function Home() {
   const [audit, setAudit] = useState<AuditRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<{ email: string; displayName: string } | null>(null);
   const [collaborationReady, setCollaborationReady] = useState(false);
+  const [productMasterStats, setProductMasterStats] = useState<ProductMasterStats | null>(null);
+  const productMasterRef = useRef<CatalogProduct[] | null>(null);
   // This legacy module-level snapshot lets the existing analytical page functions share one active dataset.
   // eslint-disable-next-line react-hooks/globals
   data = runtimeData;
   useEffect(() => {
-    if (marketplaceSelection === "all") return;
+    if (marketplaceSelection === "all" || marketplaceSelection === "allegro_pl") return;
+    // A user-uploaded product master (held in the browser) overrides the baked-in
+    // catalog and drives the products everywhere, even without server storage.
+    if (productMasterRef.current === null) {
+      const stored = loadStoredProductMaster();
+      if (stored) { productMasterRef.current = stored.products; setProductMasterStats(stored.stats); }
+    }
+    const withMaster = (base: DashboardData) => productMasterRef.current?.length ? applyCatalogToData(base, productMasterRef.current) : base;
     let active = true;
     setStorageStatus("loading");
     fetch(snapshotRequestPath(undefined, marketplaceSelection), { cache: "no-store" })
@@ -2045,17 +2287,17 @@ export default function Home() {
       })
       .then((payload) => {
         if (!active || !payload.snapshot || !payload.summary || !payload.history) return;
-        setRuntimeData(payload.snapshot);
+        setRuntimeData(withMaster(payload.snapshot));
         setCurrentSummary(payload.summary);
         setHistory(payload.history);
         setMarketplaceAvailable(true);
         setStorageStatus("ready");
       })
-      .catch(() => { if (active) { const empty = emptyMarketplaceData(marketplaceSelection); setRuntimeData(empty); setCurrentSummary(summaryFromData(empty, `empty-${marketplaceSelection}`)); setHistory([]); setMarketplaceAvailable(false); setStorageStatus("ready"); } });
+      .catch(() => { if (active) { const empty = emptyMarketplaceData(marketplaceSelection); setRuntimeData(withMaster(empty)); setCurrentSummary(summaryFromData(empty, `empty-${marketplaceSelection}`)); setHistory([]); setMarketplaceAvailable(true); setStorageStatus("ready"); } });
     return () => { active = false; };
   }, [marketplaceSelection]);
   useEffect(() => {
-    if (storageStatus !== "ready" || !marketplaceAvailable || marketplaceSelection === "all") return;
+    if (storageStatus !== "ready" || !marketplaceAvailable || marketplaceSelection === "all" || marketplaceSelection === "allegro_pl") return;
     let active = true;
     fetch(`/api/app-state?snapshotId=${encodeURIComponent(currentSummary.id)}`, { cache: "no-store" })
       .then(async (response) => {
@@ -2251,6 +2493,19 @@ export default function Home() {
     setHistory(nextHistory);
     setStorageStatus("ready");
   };
+  const applyProductMaster = (products: CatalogProduct[], stats: ProductMasterStats) => {
+    productMasterRef.current = products;
+    setProductMasterStats(stats);
+    saveStoredProductMaster(products, stats);
+    setRuntimeData((current) => applyCatalogToData(current, products));
+    setMarketplaceAvailable(true);
+  };
+  const clearProductMaster = () => {
+    productMasterRef.current = null;
+    setProductMasterStats(null);
+    clearStoredProductMaster();
+    setRuntimeData((current) => ({ ...current, catalogProducts: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).catalogProducts, products: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).products, quality: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).quality }));
+  };
   const changeMarketplace = (selection: MarketplaceSelection) => {
     setMarketplaceSelection(selection);
     setAdvertisingRange(null);
@@ -2326,5 +2581,5 @@ export default function Home() {
     if (marketplaceSelection === "all") setMarketplaceSelection("kaufland_de");
     setPage("imports");
   };
-  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar"><ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} /><div className="top-actions"><a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a><SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{advertisingRange && page !== "dashboard" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} />}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</div></main></div>;
+  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Marketplace</span><b>Allegro PL · złoty + euro</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection !== "allegro_pl" && <a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a>}<SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{marketplaceSelection === "allegro_pl" ? <AllegroWorkspace /> : <>{advertisingRange && page !== "dashboard" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</>}</div></main></div>;
 }

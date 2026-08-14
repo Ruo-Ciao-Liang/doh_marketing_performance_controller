@@ -1,4 +1,4 @@
-export type MarketplaceId = "amazon_de" | "kaufland_de";
+export type MarketplaceId = "amazon_de" | "kaufland_de" | "allegro_pl";
 export type MarketplaceSelection = MarketplaceId | "all";
 
 export interface MarketplaceCapabilities {
@@ -29,8 +29,9 @@ export interface MarketplaceDefinition {
   shortName: string;
   platform: string;
   country: string;
-  currency: "EUR";
-  timezone: "Europe/Berlin";
+  currency: "EUR" | "PLN";
+  nativeCurrency?: "EUR" | "PLN";
+  timezone: string;
   capabilities: MarketplaceCapabilities;
   importRequirements: MarketplaceImportRequirement[];
 }
@@ -97,12 +98,42 @@ export const marketplaceRegistry: Record<MarketplaceId, MarketplaceDefinition> =
       { role: "kaufland_spa_daily_cost_campaign", title: "SPA daily cost by campaign", cadence: "daily", description: "Campaign-level daily spend reconciliation; never added twice." },
     ],
   },
+  allegro_pl: {
+    id: "allegro_pl",
+    name: "Allegro PL",
+    shortName: "Allegro",
+    platform: "Allegro",
+    country: "Poland",
+    currency: "PLN",
+    nativeCurrency: "PLN",
+    timezone: "Europe/Warsaw",
+    capabilities: {
+      retail: true,
+      retailSessions: true,
+      advertising: true,
+      placements: false,
+      currentBids: false,
+      exactBidSuggestions: false,
+      keywordOwnership: false,
+      harvest: false,
+      exactConflictDetection: false,
+      dailyAdvertising: false,
+      profitability: false,
+    },
+    importRequirements: [
+      { role: "allegro_campaign_statistics", title: "Campaign statistics", cadence: "summary", description: "Allegro Ads campaign impressions, clicks, gross/net cost and ROAS (PLN)." },
+      { role: "allegro_offer_summary", title: "Offer & product summary", cadence: "summary", description: "Retail sales, transactions, quantity, views and conversion by offer and product (PLN)." },
+      { role: "allegro_traffic_report", title: "Traffic report", cadence: "summary", description: "Offer-level views, likes and added-to-cart enrichment.", optional: true },
+    ],
+  },
 };
 
 export const marketplaceIds = Object.keys(marketplaceRegistry) as MarketplaceId[];
 
 export function normalizeMarketplaceId(value: string | null | undefined): MarketplaceId {
-  return value === "kaufland_de" ? "kaufland_de" : "amazon_de";
+  if (value === "kaufland_de") return "kaufland_de";
+  if (value === "allegro_pl") return "allegro_pl";
+  return "amazon_de";
 }
 
 export function getMarketplaceDefinition(value: string | null | undefined): MarketplaceDefinition {
