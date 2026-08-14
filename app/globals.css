@@ -255,3 +255,6 @@ button { color:inherit; }
 .table-panel .allegro-money small{font-size:7px}
 @media(max-width:1150px){.allegro-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.allegro-heading{flex-direction:column}}
 @media(max-width:720px){.allegro-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* EUR sub-value under a KPI card's primary PLN value (Allegro) */
+.kpi-card .kpi-subvalue{display:block;margin-top:-2px;color:#2a7d59;font-size:11px;font-weight:800;letter-spacing:.01em}

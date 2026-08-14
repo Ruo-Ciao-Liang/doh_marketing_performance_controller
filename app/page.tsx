@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import snapshot from "@/data/generated/normalized.json";
 import {
   buildSuggestions,
@@ -556,14 +556,17 @@ function buildKnowledgeTopics(settings: RuleSettings): KnowledgeTopic[] {
   ];
 }
 
-function KpiCard({ label, value, detail, tone = "blue", tooltip, comparisons, onSelect }: { label: string; value: string; detail: string; tone?: string; tooltip?: string; comparisons?: { label: string; value: string; tone: string; detail?: string }[]; onSelect: () => void }) {
+function KpiCard({ label, value, subValue, detail, tone = "blue", tooltip, comparisons, onSelect }: { label: string; value: string; subValue?: string; detail: string; tone?: string; tooltip?: string; comparisons?: { label: string; value: string; tone: string; detail?: string }[]; onSelect?: () => void }) {
+  const clickable = Boolean(onSelect);
+  const interaction = clickable ? { role: "button", tabIndex: 0, onClick: onSelect, onKeyDown: (event: ReactKeyboardEvent) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect?.(); } }, "aria-label": `Open details for ${label}` } : {};
   return (
-    <article className={`kpi-card tone-${tone} clickable-kpi`} title={tooltip} role="button" tabIndex={0} aria-label={`Open details for ${label}`} onClick={onSelect} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(); } }}>
+    <article className={`kpi-card tone-${tone} ${clickable ? "clickable-kpi" : ""}`} title={tooltip} {...interaction}>
       <div className="kpi-top"><span>{label}</span>{tooltip ? <span className="kpi-info" aria-label={tooltip}>i</span> : <span className="kpi-dot" />}</div>
       <strong>{value}</strong>
+      {subValue && <span className="kpi-subvalue">{subValue}</span>}
       <small>{detail}</small>
       {comparisons && <div className="kpi-comparisons">{comparisons.map((comparison) => <span className={comparison.tone} key={comparison.label} title={comparison.detail}><b>{comparison.label}</b>{comparison.value}</span>)}</div>}
-      <span className="kpi-action">Explore details <b>→</b></span>
+      {clickable && <span className="kpi-action">Explore details <b>→</b></span>}
     </article>
   );
 }
@@ -2125,14 +2128,14 @@ function clearStoredAllegro() {
   try { window.localStorage.removeItem(ALLEGRO_STORAGE_KEY); } catch { /* ignore */ }
 }
 
-type AllegroTab = "overview" | "campaigns" | "offers" | "products" | "import";
+type AllegroTab = "campaigns" | "offers" | "products" | "import";
 
 function AllegroWorkspace() {
   const stored = useMemo(() => loadStoredAllegro(), []);
   const [snapshot, setSnapshot] = useState<AllegroSnapshot | null>(stored?.snapshot ?? null);
   const [fxRate, setFxRate] = useState<number>(stored?.fxRate ?? DEFAULT_PLN_EUR_RATE);
   const [fileNames, setFileNames] = useState<string[]>(stored?.fileNames ?? []);
-  const [tab, setTab] = useState<AllegroTab>(stored?.snapshot ? "overview" : "import");
+  const [tab, setTab] = useState<AllegroTab>("campaigns");
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
@@ -2159,7 +2162,7 @@ function AllegroWorkspace() {
       setSnapshot(result);
       setFileNames(names);
       saveStoredAllegro(result, fxRate, names);
-      setTab("overview");
+      setTab("campaigns");
       const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
       setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `Imported ${result.sources.length} Allegro report${result.sources.length === 1 ? "" : "s"} covering ${result.periodStart ? displayDate(result.periodStart) : "?"} – ${result.periodEnd ? displayDate(result.periodEnd) : "?"}.${warningText}` });
     } catch (error) {
@@ -2184,19 +2187,48 @@ function AllegroWorkspace() {
     </section>
   );
 
+  // Allegro-native totals; when nothing is imported yet every card reads zero, mirroring
+  // the Amazon control room's empty state. Only KPIs Allegro actually reports are shown —
+  // no profitability/margin, sessions or catalog-coverage cards.
+  const adv = snapshot?.totals.advertising;
+  const retail = snapshot?.totals.retail;
+  const tacos = snapshot?.totals.combined.tacos ?? null;
+  const n = (value?: number | null) => value ?? 0;
+  const adConversion = n(adv?.clicks) > 0 ? n(adv?.unitsSold) / n(adv?.clicks) : 0;
+
   const header = (
     <div className="page-heading allegro-heading">
-      <div><span className="eyebrow">Polish marketplace · PLN with EUR{snapshot?.account ? ` · account ${snapshot.account}` : ""}</span><h1>Allegro PL control room</h1><p>{snapshot?.periodStart && snapshot?.periodEnd ? `Reconciled Allegro Ads and retail performance for ${displayDate(snapshot.periodStart)} – ${displayDate(snapshot.periodEnd)}${snapshot.days ? ` · ${snapshot.days} days` : ""}. All values are shown in złoty and converted to euro.` : "Upload the Allegro exports to see campaigns, offers and products in PLN and EUR."}</p></div>
+      <div><span className="eyebrow">{snapshot?.days ? `${snapshot.days}-day performance` : "Allegro performance"}{snapshot?.account ? ` · account ${snapshot.account}` : ""}</span><h1>Allegro PL control room</h1><p>{snapshot?.periodStart && snapshot?.periodEnd ? `Reconciled Allegro Ads and retail demand for ${displayDate(snapshot.periodStart)} – ${displayDate(snapshot.periodEnd)}. Every value is shown in złoty with its euro equivalent.` : "Retail demand and advertising efficiency for the Polish marketplace, in złoty with the euro equivalent. Import the Allegro exports to populate these cards."}</p></div>
       <label className="allegro-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={fxRate} onChange={(event) => setRate(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>
     </div>
   );
 
-  if (!snapshot) return <>{header}{importPanel}</>;
+  const movement = (
+    <section className="comparison-overview" aria-label="Month-over-month and year-over-year comparison status">
+      <div className="comparison-overview-copy"><span className="eyebrow">Movement</span><h2>MoM and YoY change</h2><p>Month-over-month and year-over-year change appears on every card once a second Allegro period is imported.</p></div>
+      <div className="comparison-period missing"><span>MoM</span><b>Comparison period missing</b><small>Import a prior Allegro period</small></div>
+      <div className="comparison-period missing"><span>YoY</span><b>Comparison period missing</b><small>Import a year-earlier Allegro period</small></div>
+    </section>
+  );
 
-  const adv = snapshot.totals.advertising;
-  const retail = snapshot.totals.retail;
+  const dashboard = (
+    <section className="kpi-grid">
+      <KpiCard label="Advertising sales" value={pln(n(adv?.sales))} subValue={euro(toEur(n(adv?.sales)))} detail={`${integer.format(n(adv?.unitsSold))} attributed units`} />
+      <KpiCard label="Advertising spend" value={pln(n(adv?.spendNet))} subValue={euro(toEur(n(adv?.spendNet)))} detail={`${pln(n(adv?.cpcNet), true)} average CPC`} tone="violet" />
+      <KpiCard label="ACoS" value={pct(adv?.acos ?? 0)} detail={`${decimal.format(adv?.roas ?? 0)}× ROAS`} tone="amber" />
+      <KpiCard label="TACoS" value={pct(tacos ?? 0)} detail={`${pln(n(adv?.spendNet))} ad cost ÷ ${pln(n(retail?.sales))} retail sales`} tone="amber" tooltip="TACoS = advertising spend ÷ retail sales." />
+      <KpiCard label="Retail sales" value={pln(n(retail?.sales))} subValue={euro(toEur(n(retail?.sales)))} detail={`${integer.format(n(retail?.unitsSold))} units across ${integer.format(snapshot?.offers.length ?? 0)} offers`} tone="green" />
+      <KpiCard label="Retail transactions" value={integer.format(n(retail?.transactions))} detail={`${integer.format(n(retail?.unitsSold))} units sold`} tone="green" />
+      <KpiCard label="Impressions" value={integer.format(n(adv?.impressions))} detail={`${pct(adv?.ctr ?? 0, 2)} click-through rate`} />
+      <KpiCard label="Clicks" value={integer.format(n(adv?.clicks))} detail={`${pct(adConversion, 2)} advertising conversion`} tone="violet" />
+      <KpiCard label="Offer views" value={integer.format(n(retail?.views))} detail={`${pct(retail?.conversion ?? 0, 2)} conversion`} tone="green" />
+      <KpiCard label="Added to cart" value={integer.format(n(retail?.addedToCart))} detail="offer engagement signal" tone="slate" />
+    </section>
+  );
+
+  if (!snapshot) return <>{header}{movement}{dashboard}<p className="allegro-note">All cards read zero until Allegro data is imported. Only the KPIs Allegro reports are shown — advertising (spend, sales, ACoS, impressions, clicks) and retail demand (sales, transactions, views, added-to-cart). Contribution margin, sessions and catalog coverage are not available from Allegro exports.</p>{importPanel}</>;
+
   const tabs: { key: AllegroTab; label: string }[] = [
-    { key: "overview", label: "Overview" },
     { key: "campaigns", label: `Campaigns · ${snapshot.campaigns.length}` },
     { key: "offers", label: `Offers · ${snapshot.offers.length}` },
     { key: "products", label: `Products · ${snapshot.products.length}` },
@@ -2205,23 +2237,10 @@ function AllegroWorkspace() {
 
   return <>
     {header}
+    {movement}
+    {dashboard}
+    <p className="allegro-note">Advertising figures come from the Allegro Ads campaign export; retail figures from the offer summary. Ad-attributed sales can exceed offer-summary sales because they use Allegro's click-attribution window. Contribution margin, sessions and catalog coverage are not reported by Allegro and are omitted rather than estimated.</p>
     <nav className="allegro-tabs">{tabs.map((item) => <button type="button" key={item.key} className={tab === item.key ? "active" : ""} onClick={() => setTab(item.key)}>{item.label}</button>)}</nav>
-
-    {tab === "overview" && <>
-      <section className="allegro-kpis">
-        <article><span>Ad spend (net)</span>{money(adv.spendNet)}</article>
-        <article><span>Ad sales (attributed)</span>{money(adv.sales)}</article>
-        <article><span>ACoS</span><span className="allegro-metric">{pct(adv.acos)}</span><small>{adv.roas == null ? "—" : `${adv.roas.toFixed(2)}× ROAS`}</small></article>
-        <article><span>TACoS (ad cost ÷ retail sales)</span><span className="allegro-metric">{pct(snapshot.totals.combined.tacos)}</span></article>
-        <article><span>Retail sales</span>{money(retail.sales)}</article>
-        <article><span>Retail transactions</span><span className="allegro-metric">{integer.format(retail.transactions)}</span><small>{integer.format(retail.unitsSold)} units sold</small></article>
-        <article><span>Impressions</span><span className="allegro-metric">{integer.format(adv.impressions)}</span><small>{integer.format(adv.clicks)} clicks · {pct(adv.ctr, 2)} CTR</small></article>
-        <article><span>Avg CPC (net)</span>{money(adv.cpcNet)}</article>
-        <article><span>Offer views</span><span className="allegro-metric">{integer.format(retail.views)}</span><small>{pct(retail.conversion, 2)} conversion</small></article>
-        <article><span>Added to cart</span><span className="allegro-metric">{integer.format(retail.addedToCart)}</span></article>
-      </section>
-      <p className="allegro-note">Advertising figures come from the Allegro Ads campaign export; retail figures from the offer summary. Ad-attributed sales can exceed offer-summary sales because they use Allegro's click-attribution window. Missing values are shown as “—”, never zero.</p>
-    </>}
 
     {tab === "campaigns" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Campaign</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>CPC (net)</th><th>Spend (net)</th><th>Ad sales</th><th>ROAS</th></tr></thead><tbody>{snapshot.campaigns.map((campaign) => <tr key={campaign.name}><td><b>{campaign.name}</b></td><td>{integer.format(campaign.impressions)}</td><td>{integer.format(campaign.clicks)}</td><td>{pct(campaign.ctr, 2)}</td><td>{money(campaign.cpcNet)}</td><td>{money(campaign.spendNet)}</td><td>{money(campaign.sales)}</td><td>{campaign.roas == null ? "—" : `${campaign.roas.toFixed(2)}×`}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.campaigns.length} campaigns</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
 
