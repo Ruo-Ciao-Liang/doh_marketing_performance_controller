@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1784806183493,
+      "tag": "0000_remarkable_speed",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784889017974,
+      "tag": "0001_lowly_secret_warriors",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784900961868,
+      "tag": "0002_condemned_the_call",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785751200000,
+      "tag": "0003_marketplace_foundation",
+      "breakpoints": true
+    }
+  ]
+}

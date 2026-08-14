@@ -1,0 +1,1 @@
+ALTER TABLE `organization_settings` ADD `policy_json` text DEFAULT '{}' NOT NULL;
