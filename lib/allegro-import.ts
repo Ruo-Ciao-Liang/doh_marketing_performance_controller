@@ -26,6 +26,7 @@ export interface AllegroOffer {
   offerId: string;
   name: string;
   productId: string | null;
+  campaign: string | null;
   sales: number;
   avgPrice: number | null;
   price: number | null;
@@ -131,7 +132,7 @@ export async function parseAllegroFiles(files: File[]): Promise<AllegroSnapshot>
   const warnings: string[] = [];
   const sources: AllegroSource[] = [];
   const campaigns: AllegroCampaign[] = [];
-  const adSalesByOffer = new Map<string, { sales: number; units: number }>();
+  const adSalesByOffer = new Map<string, { sales: number; units: number; campaign: string | null }>();
   let offers: AllegroOffer[] = [];
   let products: AllegroProduct[] = [];
   const trafficByOffer = new Map<string, { views: number; addedToCart: number; favorited: number; transactions: number }>();
@@ -191,8 +192,9 @@ export async function parseAllegroFiles(files: File[]): Promise<AllegroSnapshot>
           if (!offerId) continue;
           const sales = num(row, "Sales value (PLN)", "Sales value") ?? 0;
           const units = num(row, "Quantity sold") ?? 0;
-          const current = adSalesByOffer.get(offerId) ?? { sales: 0, units: 0 };
-          adSalesByOffer.set(offerId, { sales: current.sales + sales, units: current.units + units });
+          const campaign = pick(row, "Campaign name") || null;
+          const current = adSalesByOffer.get(offerId) ?? { sales: 0, units: 0, campaign: null };
+          adSalesByOffer.set(offerId, { sales: current.sales + sales, units: current.units + units, campaign: current.campaign ?? campaign });
         }
         sources.push({ key: "campaign_sales", label: "Ad-attributed sales", fileName: file.name, rows: objects.length });
         continue;
@@ -218,6 +220,7 @@ export async function parseAllegroFiles(files: File[]): Promise<AllegroSnapshot>
           offerId: pick(row, "Offer ID"),
           name: pick(row, "Offer name"),
           productId: pick(row, "Product ID") || null,
+          campaign: null as string | null,
           sales: round(num(row, "Sales value")) ?? 0,
           avgPrice: round(num(row, "Average price")),
           price: round(num(row, "Price")),
@@ -277,7 +280,7 @@ export async function parseAllegroFiles(files: File[]): Promise<AllegroSnapshot>
   // Merge ad-attributed sales and traffic enrichment onto offers.
   for (const offer of offers) {
     const ad = adSalesByOffer.get(offer.offerId);
-    if (ad) { offer.adSales = round(ad.sales) ?? 0; offer.adUnits = ad.units; }
+    if (ad) { offer.adSales = round(ad.sales) ?? 0; offer.adUnits = ad.units; offer.campaign = offer.campaign ?? ad.campaign; }
     if (!offer.views) {
       const traffic = trafficByOffer.get(offer.offerId);
       if (traffic) { offer.views = traffic.views; offer.addedToCart = offer.addedToCart || traffic.addedToCart; offer.favorited = offer.favorited || traffic.favorited; }

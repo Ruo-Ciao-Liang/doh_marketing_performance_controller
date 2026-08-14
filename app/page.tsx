@@ -25,6 +25,7 @@ import { comparableMetrics, rankComparisonRows, type ComparableMetricKey, type M
 import { marketplaceRegistry, type MarketplaceId, type MarketplaceSelection } from "@/lib/marketplaces";
 import { parseProductMasterFile, type CatalogProduct, type ProductMasterStats } from "@/lib/product-master-import";
 import { parseAllegroFiles, type AllegroSnapshot } from "@/lib/allegro-import";
+import { buildAllegroDashboardData } from "@/lib/allegro-dashboard";
 import { createTabularWorkbook } from "@/lib/review-export";
 import type { MergedAdvertisingRange } from "@/lib/advertising-range";
 import {
@@ -75,10 +76,20 @@ const money2 = new Intl.NumberFormat("en-GB", { style: "currency", currency: "EU
 const integer = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 });
 const decimal = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 2 });
 const pct = (value: number | null | undefined, digits = 1) => value == null ? "—" : `${(value * 100).toFixed(digits)}%`;
-const euro = (value: number | null | undefined, cents = false) => value == null ? "—" : cents ? money2.format(value) : money.format(value);
 const zloty = new Intl.NumberFormat("en-GB", { style: "currency", currency: "PLN", maximumFractionDigits: 0 });
 const zloty2 = new Intl.NumberFormat("en-GB", { style: "currency", currency: "PLN", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pln = (value: number | null | undefined, cents = false) => value == null ? "—" : cents ? zloty2.format(value) : zloty.format(value);
+// The active marketplace's native currency and its EUR rate. Set once per render from
+// data.reporting so every shared page formats money in the marketplace's own currency
+// (EUR for Amazon/Kaufland, PLN for Allegro) without touching each call site.
+let activeCurrency: "EUR" | "PLN" = "EUR";
+let activeFxToEur = 1;
+// Native-currency money (the pervasive formatter). Historically euro-only; now switches
+// to złoty when the active marketplace is PLN.
+const euro = (value: number | null | undefined, cents = false) => value == null ? "—" : activeCurrency === "PLN" ? (cents ? zloty2 : zloty).format(value) : (cents ? money2 : money).format(value);
+// The EUR equivalent of a native-currency amount (identity for EUR marketplaces). Used to
+// show the euro figure alongside złoty on Allegro.
+const eurFrom = (nativeValue: number | null | undefined, cents = true) => nativeValue == null ? "—" : (cents ? money2 : money).format(activeCurrency === "PLN" ? nativeValue * activeFxToEur : nativeValue);
 const displayDate = (value: string) => new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T12:00:00Z`));
 
 type DashboardData = {
@@ -771,7 +782,7 @@ function Dashboard({ onNavigate, history, currentSummary, advertisingRange }: { 
   return (
     <>
       <div className="page-heading">
-        <div><span className="eyebrow">{advertisingOnly ? "Flexible advertising range" : `${data.reporting.days}-day performance`}</span><h1>Amazon DE control room</h1><p>One reconciled view of retail demand, advertising efficiency, and product profitability.</p></div>
+        <div><span className="eyebrow">{advertisingOnly ? "Flexible advertising range" : `${data.reporting.days}-day performance`}</span><h1>{data.reporting.marketplace} control room</h1><p>One reconciled view of retail demand, advertising efficiency, and product profitability.</p></div>
         <button className="primary-button" onClick={() => onNavigate("suggestions")}>Review suggestions <span>→</span></button>
       </div>
 
@@ -789,11 +800,11 @@ function Dashboard({ onNavigate, history, currentSummary, advertisingRange }: { 
       </section>
 
       <section className="kpi-grid">
-        <KpiCard label="Advertising sales" value={euro(ad.sales)} detail={`${integer.format(ad.purchases)} attributed purchases${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.sales, (item) => item.advertisingSales)} onSelect={() => setActiveMetric("adSales")} />
-        <KpiCard label="Advertising spend" value={euro(ad.spend)} detail={`${euro(ad.cpc, true)} average CPC${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.spend, (item) => item.advertisingSpend, true)} tone="violet" onSelect={() => setActiveMetric("adSpend")} />
+        <KpiCard label="Advertising sales" value={euro(ad.sales)} subValue={activeCurrency === "PLN" ? eurFrom(ad.sales) : undefined} detail={`${integer.format(ad.purchases)} attributed purchases${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.sales, (item) => item.advertisingSales)} onSelect={() => setActiveMetric("adSales")} />
+        <KpiCard label="Advertising spend" value={euro(ad.spend)} subValue={activeCurrency === "PLN" ? eurFrom(ad.spend) : undefined} detail={`${euro(ad.cpc, true)} average CPC${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.spend, (item) => item.advertisingSpend, true)} tone="violet" onSelect={() => setActiveMetric("adSpend")} />
         <KpiCard label="ACoS" value={pct(ad.acos)} detail={`${ad.roas == null ? "—" : decimal.format(ad.roas)}× ROAS${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.acos, (item) => item.acos, true)} tone="amber" onSelect={() => setActiveMetric("acos")} />
         <KpiCard label="TCOS" value={advertisingOnly ? "—" : pct(profitability.tcos, 2)} detail={advertisingOnly ? "Unavailable: retail sales are not daily yet" : `${euro(ad.spend)} ad spend ÷ ${euro(retail.sales)} reported sales`} comparisons={advertisingOnly ? undefined : comparisons(profitability.tcos, (item) => item.tcos, true)} tone="amber" tooltip="TCOS needs advertising spend and retail sales for the same date range." onSelect={() => setActiveMetric("tcos")} />
-        <KpiCard label="Retail sales" value={euro(retail.sales)} detail={advertisingOnly ? `Full ${currentSummary.periodDays}-day snapshot · ${integer.format(retail.units)} units` : `${integer.format(retail.units)} units across ${data.quality.retailCoverageProducts} reported SKUs`} comparisons={comparisons(retail.sales, (item) => item.retailSales)} tone="green" onSelect={() => setActiveMetric("retailSales")} />
+        <KpiCard label="Retail sales" value={euro(retail.sales)} subValue={activeCurrency === "PLN" ? eurFrom(retail.sales) : undefined} detail={advertisingOnly ? `Full ${currentSummary.periodDays}-day snapshot · ${integer.format(retail.units)} units` : `${integer.format(retail.units)} units across ${data.quality.retailCoverageProducts} reported SKUs`} comparisons={comparisons(retail.sales, (item) => item.retailSales)} tone="green" onSelect={() => setActiveMetric("retailSales")} />
         <KpiCard label="Net contribution margin" value={pct(profitability.netContributionMargin, 2)} detail={advertisingOnly ? `Full ${currentSummary.periodDays}-day snapshot · not custom-range` : `${euro(profitability.netContribution)} net · ${pct(profitability.retailSalesCoverage, 2)} of reported sales cost-covered`} comparisons={comparisons(profitability.netContributionMargin, (item) => item.netContributionMargin)} tone="green" tooltip={`Net sales minus purchase, delivery, ${pct(profitability.provisionRate, 0)} provision and mapped advertising costs. Unmatched products remain outside the margin calculation.`} onSelect={() => setActiveMetric("netMargin")} />
         <KpiCard label="Impressions" value={integer.format(ad.impressions)} detail={`${pct(ad.ctr, 2)} click-through rate${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.impressions, (item) => item.impressions)} onSelect={() => setActiveMetric("impressions")} />
         <KpiCard label="Clicks" value={integer.format(ad.clicks)} detail={`${pct(ad.cvr, 2)} advertising conversion${advertisingOnly ? " · custom range" : ""}`} comparisons={advertisingComparisons(ad.clicks, (item) => item.clicks)} tone="violet" onSelect={() => setActiveMetric("clicks")} />
@@ -2128,27 +2139,16 @@ function clearStoredAllegro() {
   try { window.localStorage.removeItem(ALLEGRO_STORAGE_KEY); } catch { /* ignore */ }
 }
 
-type AllegroTab = "campaigns" | "offers" | "products" | "import";
-
-function AllegroWorkspace() {
-  const stored = useMemo(() => loadStoredAllegro(), []);
-  const [snapshot, setSnapshot] = useState<AllegroSnapshot | null>(stored?.snapshot ?? null);
-  const [fxRate, setFxRate] = useState<number>(stored?.fxRate ?? DEFAULT_PLN_EUR_RATE);
-  const [fileNames, setFileNames] = useState<string[]>(stored?.fileNames ?? []);
-  const [tab, setTab] = useState<AllegroTab>("campaigns");
+function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, onImported, onClear }: {
+  snapshot: AllegroSnapshot | null;
+  marginCoverage: { matchedOffers: number; totalOffers: number };
+  productMasterLoaded: boolean;
+  onImported: (snapshot: AllegroSnapshot, fileNames: string[]) => void;
+  onClear: () => void;
+}) {
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
-
-  const toEur = (value: number | null | undefined) => (value == null ? null : value * fxRate);
-  const money = (value: number | null | undefined) => <span className="allegro-money"><b>{pln(value, true)}</b><small>{euro(toEur(value), true)}</small></span>;
-
-  const setRate = (raw: string) => {
-    const value = Number(raw);
-    const next = Number.isFinite(value) && value > 0 ? value : fxRate;
-    setFxRate(Number(raw) === 0 ? 0 : next);
-    if (snapshot) saveStoredAllegro(snapshot, Number.isFinite(value) && value >= 0 ? value : fxRate, fileNames);
-  };
 
   const importFiles = async (incoming: File[]) => {
     const files = incoming.filter((file) => /\.(xlsx|csv)$/i.test(file.name));
@@ -2159,12 +2159,9 @@ function AllegroWorkspace() {
       const result = await parseAllegroFiles(files);
       if (!result.sources.length) { setFeedback({ tone: "error", text: "None of the files matched a known Allegro export layout." }); return; }
       const names = files.map((file) => file.name);
-      setSnapshot(result);
-      setFileNames(names);
-      saveStoredAllegro(result, fxRate, names);
-      setTab("campaigns");
+      onImported(result, names);
       const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
-      setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `Imported ${result.sources.length} Allegro report${result.sources.length === 1 ? "" : "s"} covering ${result.periodStart ? displayDate(result.periodStart) : "?"} – ${result.periodEnd ? displayDate(result.periodEnd) : "?"}.${warningText}` });
+      setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `Imported ${result.sources.length} Allegro report${result.sources.length === 1 ? "" : "s"} covering ${result.periodStart ? displayDate(result.periodStart) : "?"} – ${result.periodEnd ? displayDate(result.periodEnd) : "?"}. Every sidebar tool now reflects this Allegro period.${warningText}` });
     } catch (error) {
       setFeedback({ tone: "error", text: error instanceof Error ? error.message : "The Allegro files could not be read." });
     } finally {
@@ -2172,83 +2169,18 @@ function AllegroWorkspace() {
     }
   };
 
-  const clearAll = () => { setSnapshot(null); setFileNames([]); clearStoredAllegro(); setTab("import"); setFeedback(null); };
-
-  const importPanel = (
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">Allegro exports · PLN</span><h1>Data imports</h1><p>Drop the campaign statistics workbook, the offer/product summary, and (optionally) the traffic report. Files are parsed and kept in your browser — nothing is uploaded. Every figure is stored in PLN and shown with the euro equivalent set by the rate in the top bar.</p></div><StatusPill tone={snapshot ? "ready" : "quiet"}>{snapshot ? `${snapshot.sources.length} reports loaded` : "No Allegro data"}</StatusPill></div>
     <section className="panel allegro-import-panel">
-      <div className="panel-heading"><div><span className="eyebrow">Allegro exports · PLN</span><h2>Import Allegro reports</h2><p>Drop the campaign statistics workbook, the offer/product summary, and (optionally) the traffic report. Files are parsed and kept in your browser — nothing is uploaded. Every figure is stored in PLN; EUR is derived with the rate above.</p></div></div>
       <label className={`drop-zone ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void importFiles(Array.from(event.dataTransfer.files)); }}>
         <input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" multiple disabled={busy} onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
         <span className="drop-icon">⇧</span><strong>{busy ? "Reading Allegro reports…" : "Drop Allegro .xlsx files here"}</strong><small>campaign statistics · offer/product summary · traffic report · or click to choose</small>
       </label>
       {feedback && <div className={`import-feedback ${feedback.tone}`} role="status">{feedback.text}</div>}
-      {snapshot && <div className="allegro-sources"><div className="allegro-sources-head"><StatusPill tone="ready">{snapshot.sources.length} report{snapshot.sources.length === 1 ? "" : "s"} loaded</StatusPill><button type="button" className="text-button" onClick={clearAll}>Remove Allegro data</button></div><div className="import-grid">{snapshot.sources.map((source, index) => <article className="import-card" key={`${source.key}-${index}`}><div className="file-icon">{source.fileName.toLowerCase().endsWith(".csv") ? "CSV" : "XLSX"}</div><div className="import-main"><div><h3>{source.label}</h3><StatusPill tone="ready">{integer.format(source.rows)} rows</StatusPill></div><p title={source.fileName}>{source.fileName}</p><dl><div><dt>System role</dt><dd>{source.key}</dd></div></dl></div></article>)}</div></div>}
+      {snapshot && <div className="allegro-sources"><div className="allegro-sources-head"><StatusPill tone="ready">{snapshot.sources.length} report{snapshot.sources.length === 1 ? "" : "s"} loaded</StatusPill><button type="button" className="text-button" onClick={onClear}>Remove Allegro data</button></div><div className="import-grid">{snapshot.sources.map((source, index) => <article className="import-card" key={`${source.key}-${index}`}><div className="file-icon">{source.fileName.toLowerCase().endsWith(".csv") ? "CSV" : "XLSX"}</div><div className="import-main"><div><h3>{source.label}</h3><StatusPill tone="ready">{integer.format(source.rows)} rows</StatusPill></div><p title={source.fileName}>{source.fileName}</p><dl><div><dt>System role</dt><dd>{source.key}</dd></div></dl></div></article>)}</div></div>}
       <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.allegro_pl.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
     </section>
-  );
-
-  // Allegro-native totals; when nothing is imported yet every card reads zero, mirroring
-  // the Amazon control room's empty state. Only KPIs Allegro actually reports are shown —
-  // no profitability/margin, sessions or catalog-coverage cards.
-  const adv = snapshot?.totals.advertising;
-  const retail = snapshot?.totals.retail;
-  const tacos = snapshot?.totals.combined.tacos ?? null;
-  const n = (value?: number | null) => value ?? 0;
-  const adConversion = n(adv?.clicks) > 0 ? n(adv?.unitsSold) / n(adv?.clicks) : 0;
-
-  const header = (
-    <div className="page-heading allegro-heading">
-      <div><span className="eyebrow">{snapshot?.days ? `${snapshot.days}-day performance` : "Allegro performance"}{snapshot?.account ? ` · account ${snapshot.account}` : ""}</span><h1>Allegro PL control room</h1><p>{snapshot?.periodStart && snapshot?.periodEnd ? `Reconciled Allegro Ads and retail demand for ${displayDate(snapshot.periodStart)} – ${displayDate(snapshot.periodEnd)}. Every value is shown in złoty with its euro equivalent.` : "Retail demand and advertising efficiency for the Polish marketplace, in złoty with the euro equivalent. Import the Allegro exports to populate these cards."}</p></div>
-      <label className="allegro-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={fxRate} onChange={(event) => setRate(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>
-    </div>
-  );
-
-  const movement = (
-    <section className="comparison-overview" aria-label="Month-over-month and year-over-year comparison status">
-      <div className="comparison-overview-copy"><span className="eyebrow">Movement</span><h2>MoM and YoY change</h2><p>Month-over-month and year-over-year change appears on every card once a second Allegro period is imported.</p></div>
-      <div className="comparison-period missing"><span>MoM</span><b>Comparison period missing</b><small>Import a prior Allegro period</small></div>
-      <div className="comparison-period missing"><span>YoY</span><b>Comparison period missing</b><small>Import a year-earlier Allegro period</small></div>
-    </section>
-  );
-
-  const dashboard = (
-    <section className="kpi-grid">
-      <KpiCard label="Advertising sales" value={pln(n(adv?.sales))} subValue={euro(toEur(n(adv?.sales)))} detail={`${integer.format(n(adv?.unitsSold))} attributed units`} />
-      <KpiCard label="Advertising spend" value={pln(n(adv?.spendNet))} subValue={euro(toEur(n(adv?.spendNet)))} detail={`${pln(n(adv?.cpcNet), true)} average CPC`} tone="violet" />
-      <KpiCard label="ACoS" value={pct(adv?.acos ?? 0)} detail={`${decimal.format(adv?.roas ?? 0)}× ROAS`} tone="amber" />
-      <KpiCard label="TACoS" value={pct(tacos ?? 0)} detail={`${pln(n(adv?.spendNet))} ad cost ÷ ${pln(n(retail?.sales))} retail sales`} tone="amber" tooltip="TACoS = advertising spend ÷ retail sales." />
-      <KpiCard label="Retail sales" value={pln(n(retail?.sales))} subValue={euro(toEur(n(retail?.sales)))} detail={`${integer.format(n(retail?.unitsSold))} units across ${integer.format(snapshot?.offers.length ?? 0)} offers`} tone="green" />
-      <KpiCard label="Retail transactions" value={integer.format(n(retail?.transactions))} detail={`${integer.format(n(retail?.unitsSold))} units sold`} tone="green" />
-      <KpiCard label="Impressions" value={integer.format(n(adv?.impressions))} detail={`${pct(adv?.ctr ?? 0, 2)} click-through rate`} />
-      <KpiCard label="Clicks" value={integer.format(n(adv?.clicks))} detail={`${pct(adConversion, 2)} advertising conversion`} tone="violet" />
-      <KpiCard label="Offer views" value={integer.format(n(retail?.views))} detail={`${pct(retail?.conversion ?? 0, 2)} conversion`} tone="green" />
-      <KpiCard label="Added to cart" value={integer.format(n(retail?.addedToCart))} detail="offer engagement signal" tone="slate" />
-    </section>
-  );
-
-  if (!snapshot) return <>{header}{movement}{dashboard}<p className="allegro-note">All cards read zero until Allegro data is imported. Only the KPIs Allegro reports are shown — advertising (spend, sales, ACoS, impressions, clicks) and retail demand (sales, transactions, views, added-to-cart). Contribution margin, sessions and catalog coverage are not available from Allegro exports.</p>{importPanel}</>;
-
-  const tabs: { key: AllegroTab; label: string }[] = [
-    { key: "campaigns", label: `Campaigns · ${snapshot.campaigns.length}` },
-    { key: "offers", label: `Offers · ${snapshot.offers.length}` },
-    { key: "products", label: `Products · ${snapshot.products.length}` },
-    { key: "import", label: "Import" },
-  ];
-
-  return <>
-    {header}
-    {movement}
-    {dashboard}
-    <p className="allegro-note">Advertising figures come from the Allegro Ads campaign export; retail figures from the offer summary. Ad-attributed sales can exceed offer-summary sales because they use Allegro's click-attribution window. Contribution margin, sessions and catalog coverage are not reported by Allegro and are omitted rather than estimated.</p>
-    <nav className="allegro-tabs">{tabs.map((item) => <button type="button" key={item.key} className={tab === item.key ? "active" : ""} onClick={() => setTab(item.key)}>{item.label}</button>)}</nav>
-
-    {tab === "campaigns" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Campaign</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>CPC (net)</th><th>Spend (net)</th><th>Ad sales</th><th>ROAS</th></tr></thead><tbody>{snapshot.campaigns.map((campaign) => <tr key={campaign.name}><td><b>{campaign.name}</b></td><td>{integer.format(campaign.impressions)}</td><td>{integer.format(campaign.clicks)}</td><td>{pct(campaign.ctr, 2)}</td><td>{money(campaign.cpcNet)}</td><td>{money(campaign.spendNet)}</td><td>{money(campaign.sales)}</td><td>{campaign.roas == null ? "—" : `${campaign.roas.toFixed(2)}×`}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.campaigns.length} campaigns</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
-
-    {tab === "offers" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Offer</th><th>Offer ID</th><th>Retail sales</th><th>Avg price</th><th>Transactions</th><th>Units</th><th>Conversion</th><th>Views</th><th>Ad sales</th></tr></thead><tbody>{snapshot.offers.slice(0, 300).map((offer) => <tr key={offer.offerId || offer.name}><td><b>{offer.name || "—"}</b></td><td>{offer.offerId || "—"}</td><td>{money(offer.sales)}</td><td>{money(offer.avgPrice)}</td><td>{integer.format(offer.transactions)}</td><td>{integer.format(offer.unitsSold)}</td><td>{pct(offer.conversion, 2)}</td><td>{integer.format(offer.views)}</td><td>{offer.adSales ? money(offer.adSales) : "—"}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.offers.length} offers{snapshot.offers.length > 300 ? " (showing first 300)" : ""}</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
-
-    {tab === "products" && <section className="panel table-panel"><div className="table-wrap tall"><table><thead><tr><th>Product</th><th>Retail sales</th><th>Avg price</th><th>Min–Max price</th><th>Transactions</th><th>Units</th><th>Conversion</th><th>Views</th><th>Offers</th></tr></thead><tbody>{snapshot.products.slice(0, 300).map((product) => <tr key={product.productId || product.name}><td><b>{product.name || "—"}</b></td><td>{money(product.sales)}</td><td>{money(product.avgPrice)}</td><td>{product.minPrice == null && product.maxPrice == null ? "—" : `${pln(product.minPrice, true)} – ${pln(product.maxPrice, true)}`}</td><td>{integer.format(product.transactions)}</td><td>{integer.format(product.unitsSold)}</td><td>{pct(product.conversion, 2)}</td><td>{integer.format(product.views)}</td><td>{product.numberOfOffers == null ? "—" : integer.format(product.numberOfOffers)}</td></tr>)}</tbody></table></div><div className="table-footer"><span>{snapshot.products.length} products{snapshot.products.length > 300 ? " (showing first 300)" : ""}</span><span>PLN native · EUR at 1 PLN = {fxRate} EUR</span></div></section>}
-
-    {tab === "import" && importPanel}
+    <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each Allegro offer to your uploaded product master — first by the Allegro Ads campaign name (which mirrors the internal SKU), then by the SKU appearing in the offer title. Unmatched offers stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedOffers > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedOffers)}/${integer.format(marginCoverage.totalOffers)} offers matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master on the Amazon <b>Data imports</b> tab (or switch to Amazon and upload it) whose SKUs match the Allegro campaign names, then the Net contribution margin card populates here too.</p>}</section>
   </>;
 }
 
@@ -2284,9 +2216,17 @@ export default function Home() {
   const [collaborationReady, setCollaborationReady] = useState(false);
   const [productMasterStats, setProductMasterStats] = useState<ProductMasterStats | null>(null);
   const productMasterRef = useRef<CatalogProduct[] | null>(null);
+  const [allegroSnapshot, setAllegroSnapshot] = useState<AllegroSnapshot | null>(null);
+  const [allegroFx, setAllegroFx] = useState<number>(DEFAULT_PLN_EUR_RATE);
+  const [allegroFileNames, setAllegroFileNames] = useState<string[]>([]);
+  const [allegroMarginCoverage, setAllegroMarginCoverage] = useState<{ matchedOffers: number; totalOffers: number }>({ matchedOffers: 0, totalOffers: 0 });
   // This legacy module-level snapshot lets the existing analytical page functions share one active dataset.
   // eslint-disable-next-line react-hooks/globals
   data = runtimeData;
+  // eslint-disable-next-line react-hooks/globals
+  activeCurrency = runtimeData.reporting.currency === "PLN" ? "PLN" : "EUR";
+  // eslint-disable-next-line react-hooks/globals
+  activeFxToEur = runtimeData.reporting.fxRateToEur ?? 1;
   useEffect(() => {
     if (marketplaceSelection === "all" || marketplaceSelection === "allegro_pl") return;
     // A user-uploaded product master (held in the browser) overrides the baked-in
@@ -2315,6 +2255,30 @@ export default function Home() {
       .catch(() => { if (active) { const empty = emptyMarketplaceData(marketplaceSelection); setRuntimeData(withMaster(empty)); setCurrentSummary(summaryFromData(empty, `empty-${marketplaceSelection}`)); setHistory([]); setMarketplaceAvailable(true); setStorageStatus("ready"); } });
     return () => { active = false; };
   }, [marketplaceSelection]);
+  // Load any browser-persisted Allegro reports and product master once on mount.
+  useEffect(() => {
+    if (productMasterRef.current === null) {
+      const storedMaster = loadStoredProductMaster();
+      if (storedMaster) { productMasterRef.current = storedMaster.products; setProductMasterStats(storedMaster.stats); }
+    }
+    const storedAllegro = loadStoredAllegro();
+    if (storedAllegro) { setAllegroSnapshot(storedAllegro.snapshot); setAllegroFx(storedAllegro.fxRate); setAllegroFileNames(storedAllegro.fileNames); }
+  }, []);
+  // Allegro flows through the same shared pages as Amazon/Kaufland: rebuild a standard
+  // PLN-native snapshot from the Allegro reports (joined to the product master for margin)
+  // whenever Allegro is active, the reports change, or the FX rate changes.
+  useEffect(() => {
+    if (marketplaceSelection !== "allegro_pl") return;
+    const { snapshot, marginCoverage } = buildAllegroDashboardData(allegroSnapshot, productMasterRef.current, allegroFx);
+    const built = snapshot as unknown as DashboardData;
+    const summary = summaryFromData(built, allegroSnapshot ? "allegro-current" : "allegro-empty");
+    setRuntimeData(built);
+    setCurrentSummary(summary);
+    setHistory([summary]);
+    setAllegroMarginCoverage({ matchedOffers: marginCoverage.matchedOffers, totalOffers: marginCoverage.totalOffers });
+    setMarketplaceAvailable(true);
+    setStorageStatus("ready");
+  }, [marketplaceSelection, allegroSnapshot, allegroFx]);
   useEffect(() => {
     if (storageStatus !== "ready" || !marketplaceAvailable || marketplaceSelection === "all" || marketplaceSelection === "allegro_pl") return;
     let active = true;
@@ -2525,6 +2489,22 @@ export default function Home() {
     clearStoredProductMaster();
     setRuntimeData((current) => ({ ...current, catalogProducts: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).catalogProducts, products: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).products, quality: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).quality }));
   };
+  const applyAllegro = (snap: AllegroSnapshot, names: string[]) => {
+    setAllegroSnapshot(snap);
+    setAllegroFileNames(names);
+    saveStoredAllegro(snap, allegroFx, names);
+  };
+  const clearAllegro = () => {
+    setAllegroSnapshot(null);
+    setAllegroFileNames([]);
+    clearStoredAllegro();
+  };
+  const changeAllegroFx = (raw: string) => {
+    const value = Number(raw);
+    const next = Number.isFinite(value) && value >= 0 ? value : allegroFx;
+    setAllegroFx(next);
+    if (allegroSnapshot) saveStoredAllegro(allegroSnapshot, next, allegroFileNames);
+  };
   const changeMarketplace = (selection: MarketplaceSelection) => {
     setMarketplaceSelection(selection);
     setAdvertisingRange(null);
@@ -2600,5 +2580,5 @@ export default function Home() {
     if (marketplaceSelection === "all") setMarketplaceSelection("kaufland_de");
     setPage("imports");
   };
-  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Marketplace</span><b>Allegro PL · złoty + euro</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection !== "allegro_pl" && <a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a>}<SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{marketplaceSelection === "allegro_pl" ? <AllegroWorkspace /> : <>{advertisingRange && page !== "dashboard" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</>}</div></main></div>;
+  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Allegro PL · złoty + euro</span><b>{currentSummary.periodStart ? `${displayDate(currentSummary.periodStart)} – ${displayDate(currentSummary.periodEnd)}` : "No Allegro period imported"}</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection === "allegro_pl" && <label className="allegro-fx topbar-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={allegroFx} onChange={(event) => changeAllegroFx(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>}<a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a><SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{advertisingRange && page !== "dashboard" && marketplaceSelection !== "allegro_pl" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && (marketplaceSelection === "allegro_pl" ? <AllegroImports snapshot={allegroSnapshot} marginCoverage={allegroMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} onImported={applyAllegro} onClear={clearAllegro} /> : <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />)}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</div></main></div>;
 }
