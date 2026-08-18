@@ -1519,13 +1519,9 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
   const [masterBusy, setMasterBusy] = useState(false);
   const [masterFeedback, setMasterFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
   const downloadProductMasterTemplate = () => {
-    // Exact headers the parser recognizes, with two example rows so the file is ready to fill.
-    const rows: (string | number)[][] = [
-      ["SKU", "EAN / GTIN", "Purchase price", "Logistic cost", "Other cost", "Price"],
-      ["SKU-0001", "4010000000017", 120, 15, 8, 299.99],
-      ["SKU-0002", "4010000000024", 95, 12.5, 6, 219],
-    ];
-    const workbook = createTabularWorkbook([{ name: "Product master", rows }], "Product master template", new Date().toISOString());
+    // Clean template: just the exact headers the parser recognizes, no example rows.
+    const rows: (string | number)[][] = [["SKU", "EAN / GTIN", "Purchase price", "Logistic cost", "Other cost", "Price"]];
+    const workbook = createTabularWorkbook([{ name: "Product master", rows }], "Product master template", new Date().toISOString(), "FF000000");
     const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
     const link = document.createElement("a"); link.href = url; link.download = "product-master-template.xlsx"; link.click(); URL.revokeObjectURL(url);
   };
