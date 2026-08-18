@@ -1,4 +1,4 @@
-export type MarketplaceId = "amazon_de" | "kaufland_de" | "allegro_pl";
+export type MarketplaceId = "amazon_de" | "kaufland_de" | "allegro_pl" | "ebay_de";
 export type MarketplaceSelection = MarketplaceId | "all";
 
 export interface MarketplaceCapabilities {
@@ -126,6 +126,38 @@ export const marketplaceRegistry: Record<MarketplaceId, MarketplaceDefinition> =
       { role: "allegro_traffic_report", title: "Traffic report", cadence: "summary", description: "Offer-level views, likes and added-to-cart enrichment.", optional: true },
     ],
   },
+  ebay_de: {
+    id: "ebay_de",
+    name: "eBay DE",
+    shortName: "eBay",
+    platform: "eBay",
+    country: "Germany",
+    currency: "EUR",
+    nativeCurrency: "EUR",
+    timezone: "Europe/Berlin",
+    capabilities: {
+      retail: true,
+      retailSessions: false,
+      advertising: true,
+      placements: false,
+      currentBids: false,
+      exactBidSuggestions: false,
+      keywordOwnership: false,
+      harvest: false,
+      exactConflictDetection: false,
+      dailyAdvertising: false,
+      profitability: false,
+    },
+    importRequirements: [
+      { role: "ebay_active_listings", title: "Active listings", cadence: "reference", description: "Listing catalog: item number, SKU (custom label), title, price, EAN and sold quantity." },
+      { role: "ebay_orders", title: "Orders report", cadence: "summary", description: "Retail orders with SKU, quantity and amount — drives retail sales." },
+      { role: "ebay_priority_campaign", title: "Promoted (priority) campaign", cadence: "summary", description: "Priority campaign impressions, clicks, ad fees, revenue and ROAS." },
+      { role: "ebay_priority_listing", title: "Promoted (priority) listing", cadence: "summary", description: "Priority advertising by listing (item)." },
+      { role: "ebay_general_listing", title: "Promoted (general) listing", cadence: "summary", description: "General / off-site promoted listing performance." },
+      { role: "ebay_priority_keyword", title: "Promoted keyword", cadence: "summary", description: "Priority keyword bids and performance.", optional: true },
+      { role: "ebay_priority_search_query", title: "Search query", cadence: "summary", description: "Priority search-query performance.", optional: true },
+    ],
+  },
 };
 
 export const marketplaceIds = Object.keys(marketplaceRegistry) as MarketplaceId[];
@@ -133,6 +165,7 @@ export const marketplaceIds = Object.keys(marketplaceRegistry) as MarketplaceId[
 export function normalizeMarketplaceId(value: string | null | undefined): MarketplaceId {
   if (value === "kaufland_de") return "kaufland_de";
   if (value === "allegro_pl") return "allegro_pl";
+  if (value === "ebay_de") return "ebay_de";
   return "amazon_de";
 }
 

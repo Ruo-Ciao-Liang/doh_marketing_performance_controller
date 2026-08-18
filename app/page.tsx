@@ -26,6 +26,8 @@ import { marketplaceRegistry, type MarketplaceId, type MarketplaceSelection } fr
 import { parseProductMasterFile, type CatalogProduct, type ProductMasterStats } from "@/lib/product-master-import";
 import { parseAllegroFiles, type AllegroSnapshot } from "@/lib/allegro-import";
 import { buildAllegroDashboardData } from "@/lib/allegro-dashboard";
+import { parseEbayFiles, type EbaySnapshot } from "@/lib/ebay-import";
+import { buildEbayDashboardData } from "@/lib/ebay-dashboard";
 import { createTabularWorkbook } from "@/lib/review-export";
 import type { MergedAdvertisingRange } from "@/lib/advertising-range";
 import {
@@ -240,7 +242,7 @@ function SaveIndicator({ status, label, detail }: { status: SaveStatus; label: s
     status === "saved" ? label :
     status === "conflict" ? "Updated by another user" :
     status === "error" ? "Could not save" : label;
-  return <>{label === "All changes saved" && <label className="marketplace-switcher"><span>Marketplace</span><select aria-label="Choose marketplace" value={marketplaceSelectionGlobal} onChange={(event) => changeMarketplaceGlobal(event.target.value as MarketplaceSelection)}><option value="amazon_de">Amazon DE</option><option value="kaufland_de">Kaufland DE</option><option value="allegro_pl">Allegro PL</option><option value="all">All marketplaces</option></select></label>}<span className={`save-indicator ${status}`} title={detail}><i />{text}</span></>;
+  return <>{label === "All changes saved" && <label className="marketplace-switcher"><span>Marketplace</span><select aria-label="Choose marketplace" value={marketplaceSelectionGlobal} onChange={(event) => changeMarketplaceGlobal(event.target.value as MarketplaceSelection)}><option value="amazon_de">Amazon DE</option><option value="kaufland_de">Kaufland DE</option><option value="allegro_pl">Allegro PL</option><option value="ebay_de">eBay DE</option><option value="all">All marketplaces</option></select></label>}<span className={`save-indicator ${status}`} title={detail}><i />{text}</span></>;
 }
 
 const summaryFromData = (currentData: DashboardData, id = "baseline-2026-07-20"): SnapshotHistorySummary => ({
@@ -2139,6 +2141,32 @@ function clearStoredAllegro() {
   try { window.localStorage.removeItem(ALLEGRO_STORAGE_KEY); } catch { /* ignore */ }
 }
 
+// eBay reports are likewise parsed and held in the browser (EUR, no FX needed).
+const EBAY_STORAGE_KEY = "mpc:ebay:v1";
+
+function loadStoredEbay(): { snapshot: EbaySnapshot; fileNames: string[] } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(EBAY_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { snapshot?: EbaySnapshot; fileNames?: string[] };
+    if (!parsed.snapshot) return null;
+    return { snapshot: parsed.snapshot, fileNames: parsed.fileNames ?? [] };
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredEbay(snapshot: EbaySnapshot, fileNames: string[]) {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(EBAY_STORAGE_KEY, JSON.stringify({ snapshot, fileNames })); } catch { /* quota */ }
+}
+
+function clearStoredEbay() {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.removeItem(EBAY_STORAGE_KEY); } catch { /* ignore */ }
+}
+
 function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, onImported, onClear }: {
   snapshot: AllegroSnapshot | null;
   marginCoverage: { matchedOffers: number; totalOffers: number };
@@ -2184,6 +2212,51 @@ function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, onImpor
   </>;
 }
 
+function EbayImports({ snapshot, marginCoverage, productMasterLoaded, onImported, onClear }: {
+  snapshot: EbaySnapshot | null;
+  marginCoverage: { matchedSkus: number; totalSkus: number };
+  productMasterLoaded: boolean;
+  onImported: (snapshot: EbaySnapshot, fileNames: string[]) => void;
+  onClear: () => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
+
+  const importFiles = async (incoming: File[]) => {
+    const files = incoming.filter((file) => /\.(csv|xlsx)$/i.test(file.name));
+    if (!files.length) { setFeedback({ tone: "error", text: "Drop the eBay .csv report exports." }); return; }
+    setBusy(true);
+    setFeedback({ tone: "warning", text: `Reading ${files.length} file${files.length === 1 ? "" : "s"}…` });
+    try {
+      const result = await parseEbayFiles(files);
+      if (!result.sources.length) { setFeedback({ tone: "error", text: "None of the files matched a known eBay export layout." }); return; }
+      const names = files.map((file) => file.name);
+      onImported(result, names);
+      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `Imported ${result.sources.length} eBay report${result.sources.length === 1 ? "" : "s"} covering ${result.periodStart ? displayDate(result.periodStart) : "?"} – ${result.periodEnd ? displayDate(result.periodEnd) : "?"}. Every sidebar tool now reflects this eBay period.${warningText}` });
+    } catch (error) {
+      setFeedback({ tone: "error", text: error instanceof Error ? error.message : "The eBay files could not be read." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">eBay exports · EUR</span><h1>Data imports</h1><p>Drop the active-listings report, the orders report, and the Promoted Listings reports (priority campaign / listing / keyword / search query, plus general listing). Files are parsed and kept in your browser — nothing is uploaded.</p></div><StatusPill tone={snapshot ? "ready" : "quiet"}>{snapshot ? `${snapshot.sources.length} reports loaded` : "No eBay data"}</StatusPill></div>
+    <section className="panel allegro-import-panel">
+      <label className={`drop-zone ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void importFiles(Array.from(event.dataTransfer.files)); }}>
+        <input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple disabled={busy} onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+        <span className="drop-icon">⇧</span><strong>{busy ? "Reading eBay reports…" : "Drop eBay .csv files here"}</strong><small>active listings · orders · promoted listings reports · or click to choose</small>
+      </label>
+      {feedback && <div className={`import-feedback ${feedback.tone}`} role="status">{feedback.text}</div>}
+      {snapshot && <div className="allegro-sources"><div className="allegro-sources-head"><StatusPill tone="ready">{snapshot.sources.length} report{snapshot.sources.length === 1 ? "" : "s"} loaded</StatusPill><button type="button" className="text-button" onClick={onClear}>Remove eBay data</button></div><div className="import-grid">{snapshot.sources.map((source, index) => <article className="import-card" key={`${source.key}-${index}`}><div className="file-icon">{source.fileName.toLowerCase().endsWith(".xlsx") ? "XLSX" : "CSV"}</div><div className="import-main"><div><h3>{source.label}</h3><StatusPill tone="ready">{integer.format(source.rows)} rows</StatusPill></div><p title={source.fileName}>{source.fileName}</p><dl><div><dt>System role</dt><dd>{source.key}</dd></div></dl></div></article>)}</div></div>}
+      <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.ebay_de.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
+    </section>
+    <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each ordered eBay SKU (custom label) to your uploaded product master. eBay SKUs match the internal SKU directly, with a trailing variant suffix stripped as a fallback. Unmatched SKUs stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedSkus > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedSkus)}/${integer.format(marginCoverage.totalSkus)} ordered SKUs matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master on the Amazon <b>Data imports</b> tab whose SKUs match the eBay custom labels, then the Net contribution margin card populates here too.</p>}</section>
+  </>;
+}
+
 export default function Home() {
   const [page, setPage] = useState<PageKey>("dashboard");
   const [marketplaceSelection, setMarketplaceSelection] = useState<MarketplaceSelection>("amazon_de");
@@ -2220,6 +2293,9 @@ export default function Home() {
   const [allegroFx, setAllegroFx] = useState<number>(DEFAULT_PLN_EUR_RATE);
   const [allegroFileNames, setAllegroFileNames] = useState<string[]>([]);
   const [allegroMarginCoverage, setAllegroMarginCoverage] = useState<{ matchedOffers: number; totalOffers: number }>({ matchedOffers: 0, totalOffers: 0 });
+  const [ebaySnapshot, setEbaySnapshot] = useState<EbaySnapshot | null>(null);
+  const [ebayFileNames, setEbayFileNames] = useState<string[]>([]);
+  const [ebayMarginCoverage, setEbayMarginCoverage] = useState<{ matchedSkus: number; totalSkus: number }>({ matchedSkus: 0, totalSkus: 0 });
   // This legacy module-level snapshot lets the existing analytical page functions share one active dataset.
   // eslint-disable-next-line react-hooks/globals
   data = runtimeData;
@@ -2228,7 +2304,7 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/globals
   activeFxToEur = runtimeData.reporting.fxRateToEur ?? 1;
   useEffect(() => {
-    if (marketplaceSelection === "all" || marketplaceSelection === "allegro_pl") return;
+    if (marketplaceSelection === "all" || marketplaceSelection === "allegro_pl" || marketplaceSelection === "ebay_de") return;
     // A user-uploaded product master (held in the browser) overrides the baked-in
     // catalog and drives the products everywhere, even without server storage.
     if (productMasterRef.current === null) {
@@ -2263,7 +2339,24 @@ export default function Home() {
     }
     const storedAllegro = loadStoredAllegro();
     if (storedAllegro) { setAllegroSnapshot(storedAllegro.snapshot); setAllegroFx(storedAllegro.fxRate); setAllegroFileNames(storedAllegro.fileNames); }
+    const storedEbay = loadStoredEbay();
+    if (storedEbay) { setEbaySnapshot(storedEbay.snapshot); setEbayFileNames(storedEbay.fileNames); }
   }, []);
+  // eBay flows through the shared pages too (EUR, so no FX): rebuild a standard snapshot
+  // from the eBay reports (joined to the product master for margin) whenever eBay is active
+  // or the reports change.
+  useEffect(() => {
+    if (marketplaceSelection !== "ebay_de") return;
+    const { snapshot, marginCoverage } = buildEbayDashboardData(ebaySnapshot, productMasterRef.current);
+    const built = snapshot as unknown as DashboardData;
+    const summary = summaryFromData(built, ebaySnapshot ? "ebay-current" : "ebay-empty");
+    setRuntimeData(built);
+    setCurrentSummary(summary);
+    setHistory([summary]);
+    setEbayMarginCoverage({ matchedSkus: marginCoverage.matchedSkus, totalSkus: marginCoverage.totalSkus });
+    setMarketplaceAvailable(true);
+    setStorageStatus("ready");
+  }, [marketplaceSelection, ebaySnapshot]);
   // Allegro flows through the same shared pages as Amazon/Kaufland: rebuild a standard
   // PLN-native snapshot from the Allegro reports (joined to the product master for margin)
   // whenever Allegro is active, the reports change, or the FX rate changes.
@@ -2280,7 +2373,7 @@ export default function Home() {
     setStorageStatus("ready");
   }, [marketplaceSelection, allegroSnapshot, allegroFx]);
   useEffect(() => {
-    if (storageStatus !== "ready" || !marketplaceAvailable || marketplaceSelection === "all" || marketplaceSelection === "allegro_pl") return;
+    if (storageStatus !== "ready" || !marketplaceAvailable || marketplaceSelection === "all" || marketplaceSelection === "allegro_pl" || marketplaceSelection === "ebay_de") return;
     let active = true;
     fetch(`/api/app-state?snapshotId=${encodeURIComponent(currentSummary.id)}`, { cache: "no-store" })
       .then(async (response) => {
@@ -2505,6 +2598,16 @@ export default function Home() {
     setAllegroFx(next);
     if (allegroSnapshot) saveStoredAllegro(allegroSnapshot, next, allegroFileNames);
   };
+  const applyEbay = (snap: EbaySnapshot, names: string[]) => {
+    setEbaySnapshot(snap);
+    setEbayFileNames(names);
+    saveStoredEbay(snap, names);
+  };
+  const clearEbay = () => {
+    setEbaySnapshot(null);
+    setEbayFileNames([]);
+    clearStoredEbay();
+  };
   const changeMarketplace = (selection: MarketplaceSelection) => {
     setMarketplaceSelection(selection);
     setAdvertisingRange(null);
@@ -2580,5 +2683,5 @@ export default function Home() {
     if (marketplaceSelection === "all") setMarketplaceSelection("kaufland_de");
     setPage("imports");
   };
-  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Allegro PL · złoty + euro</span><b>{currentSummary.periodStart ? `${displayDate(currentSummary.periodStart)} – ${displayDate(currentSummary.periodEnd)}` : "No Allegro period imported"}</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection === "allegro_pl" && <label className="allegro-fx topbar-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={allegroFx} onChange={(event) => changeAllegroFx(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>}<a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a><SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{advertisingRange && page !== "dashboard" && marketplaceSelection !== "allegro_pl" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && (marketplaceSelection === "allegro_pl" ? <AllegroImports snapshot={allegroSnapshot} marginCoverage={allegroMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} onImported={applyAllegro} onClear={clearAllegro} /> : <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />)}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</div></main></div>;
+  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Allegro PL · złoty + euro</span><b>{currentSummary.periodStart ? `${displayDate(currentSummary.periodStart)} – ${displayDate(currentSummary.periodEnd)}` : "No Allegro period imported"}</b></div> : marketplaceSelection === "ebay_de" ? <div className="topbar-marketplace-label"><span className="eyebrow">eBay DE · EUR</span><b>{ebaySnapshot?.periodStart ? `${displayDate(ebaySnapshot.periodStart)} – ${displayDate(ebaySnapshot.periodEnd!)}` : "No eBay period imported"}</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection === "allegro_pl" && <label className="allegro-fx topbar-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={allegroFx} onChange={(event) => changeAllegroFx(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>}<a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a><SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{advertisingRange && page !== "dashboard" && marketplaceSelection !== "allegro_pl" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && (marketplaceSelection === "allegro_pl" ? <AllegroImports snapshot={allegroSnapshot} marginCoverage={allegroMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} onImported={applyAllegro} onClear={clearAllegro} /> : marketplaceSelection === "ebay_de" ? <EbayImports snapshot={ebaySnapshot} marginCoverage={ebayMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} onImported={applyEbay} onClear={clearEbay} /> : <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />)}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</div></main></div>;
 }

@@ -62,12 +62,17 @@ export function sheetToObjects(rows: string[][], headerRowIndex?: number): Recor
 // ---------------------------------------------------------------------------
 
 function detectDelimiter(sample: string): string {
-  const firstLine = sample.split(/\r?\n/, 1)[0] ?? "";
+  // Sample the first several lines, not just line 1 — some exports (eBay Promoted
+  // reports) begin with a quoted preamble line that has no delimiters at all.
+  const lines = sample.split(/\r?\n/).slice(0, 12);
   const counts: Record<string, number> = { ",": 0, ";": 0, "\t": 0 };
   let inQuotes = false;
-  for (const char of firstLine) {
-    if (char === '"') inQuotes = !inQuotes;
-    else if (!inQuotes && char in counts) counts[char] += 1;
+  for (const line of lines) {
+    for (const char of line) {
+      if (char === '"') inQuotes = !inQuotes;
+      else if (!inQuotes && char in counts) counts[char] += 1;
+    }
+    inQuotes = false;
   }
   const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
   return best && best[1] > 0 ? best[0] : ",";
