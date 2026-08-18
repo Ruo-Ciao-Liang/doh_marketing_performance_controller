@@ -258,3 +258,5 @@ button { color:inherit; }
 
 /* EUR sub-value under a KPI card's primary PLN value (Allegro) */
 .kpi-card .kpi-subvalue{display:block;margin-top:-2px;color:#2a7d59;font-size:11px;font-weight:800;letter-spacing:.01em}
+
+.product-master-upload .template-button{display:inline-flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer}

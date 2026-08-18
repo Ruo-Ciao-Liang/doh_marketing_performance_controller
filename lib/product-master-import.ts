@@ -29,6 +29,7 @@ export interface CatalogProduct {
   unitCosts: {
     purchaseNet: number | null;
     deliveryNet: number | null;
+    otherNet: number | null;
     landedNet: number | null;
     provisionRate: number;
     sourceSku: string;
@@ -67,8 +68,9 @@ const FIELD_ALIASES = {
   ean: ["EAN / GTIN", "EAN", "GTIN", "EAN/GTIN", "Barcode"],
   name: ["Bezeichnung", "Name", "Product name", "Description", "Produktname", "Title"],
   price: ["price", "Price", "Available price", "VK", "VK (€)", "Verkaufspreis", "Selling price", "Retail price"],
-  purchase: ["Letzter EK", "EK", "EK (€ netto)", "Einstandspreis", "Einstandspreis (€ netto)", "Purchase cost", "Purchase price", "Cost"],
-  delivery: ["Logistikkosten", "Logistic Cost", "Logistic Cost (€ netto)", "Delivery cost", "Shipping cost", "Fulfilment cost"],
+  purchase: ["Letzter EK", "EK", "EK (€ netto)", "Einkauf", "Einkaufspreis", "Einstandspreis", "Einstandspreis (€ netto)", "Purchase cost", "Purchase price", "Cost"],
+  delivery: ["Logistikkosten", "Logistic Cost", "Logistic Cost (€ netto)", "Frachtkosten", "Frachtkosten DE", "Fracht", "Delivery cost", "Shipping cost", "Fulfilment cost", "Freight cost", "Logistic cost"],
+  other: ["Other cost", "Other costs", "Sonstige Kosten", "Sonstige Kosten (Marketing)", "Marketingkosten", "Marketing cost", "Marketing costs", "Additional cost"],
   landed: ["Landed Cost", "Landed cost", "Landed", "Gesamtkosten"],
   supplier: ["Firma / Lieferant", "Lieferant", "Supplier", "Vendor"],
   manufacturerNumber: ["Hersteller-Nr.", "Hersteller-Nr", "MPN", "Manufacturer number", "Herstellernummer"],
@@ -79,7 +81,9 @@ const FIELD_ALIASES = {
 } as const;
 
 function normalizeHeader(header: string): string {
-  return header.trim().toLowerCase().replace(/\s+/g, " ");
+  // Drop parenthetical qualifiers so "Einkauf (Letzter EK)" and "Frachtkosten DE (€)"
+  // resolve against their base aliases.
+  return header.trim().toLowerCase().replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function buildFieldIndex(headers: string[]): Record<keyof typeof FIELD_ALIASES, string | null> {
@@ -147,19 +151,22 @@ function buildProducts(rows: Row[]): { products: CatalogProduct[]; warnings: str
     const price = round(parseLocaleNumber(cellText(row, fields.price)), 2);
     const purchase = round(parseLocaleNumber(cellText(row, fields.purchase)), 2);
     const delivery = round(parseLocaleNumber(cellText(row, fields.delivery)), 2);
+    const other = round(parseLocaleNumber(cellText(row, fields.other)), 2);
     const landed = round(parseLocaleNumber(cellText(row, fields.landed)), 2);
 
     let margin = normalizeMargin(parseLocaleNumber(cellText(row, fields.margin)));
-    if (margin == null && price && purchase != null && delivery != null) {
+    // Net contribution margin = (net price − purchase − logistics − other cost) ÷ net price.
+    if (margin == null && price && purchase != null) {
       const netPrice = price / (1 + VAT_RATE);
-      if (netPrice > 0) margin = round((netPrice - purchase - delivery) / netPrice);
+      const cost = purchase + (delivery ?? 0) + (other ?? 0);
+      if (netPrice > 0) margin = round((netPrice - cost) / netPrice);
     }
     if (margin == null && price && landed != null) {
       const netPrice = price / (1 + VAT_RATE);
       if (netPrice > 0) margin = round((netPrice - landed) / netPrice);
     }
 
-    const hasCost = purchase != null || delivery != null || landed != null;
+    const hasCost = purchase != null || delivery != null || other != null || landed != null;
     const name = cellText(row, fields.name) || `Product ${sku}`;
     products.push({
       sku,
@@ -175,7 +182,7 @@ function buildProducts(rows: Row[]): { products: CatalogProduct[]; warnings: str
       margin,
       category: cellText(row, fields.category) || null,
       economicsDescription: cellText(row, fields.name) || null,
-      unitCosts: hasCost ? { purchaseNet: purchase, deliveryNet: delivery, landedNet: landed, provisionRate: PROVISION_RATE, sourceSku: sku } : null,
+      unitCosts: hasCost ? { purchaseNet: purchase, deliveryNet: delivery, otherNet: other, landedNet: landed, provisionRate: PROVISION_RATE, sourceSku: sku } : null,
       active: true,
       retail: null,
       advertising: null,

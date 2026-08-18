@@ -219,14 +219,20 @@ async function readXlsxSheets(buffer: ArrayBuffer): Promise<WorkbookSheet[]> {
   const shared = parseSharedStrings(textOf("xl/sharedStrings.xml"));
   const workbookXml = textOf("xl/workbook.xml");
   const relsXml = textOf("xl/_rels/workbook.xml.rels");
+  // Parse relationships and sheet tags attribute-order-independently — some writers
+  // emit Target before Id, or name after r:id, which order-sensitive regexes miss.
   const relMap = new Map<string, string>();
-  for (const rel of relsXml.matchAll(/<Relationship\b[^>]*Id="([^"]*)"[^>]*Target="([^"]*)"[^>]*\/?>/g)) {
-    relMap.set(rel[1], rel[2].replace(/^\//, "").replace(/^xl\//, ""));
+  for (const rel of relsXml.matchAll(/<Relationship\b[^>]*?\/?>/g)) {
+    const id = /\bId="([^"]*)"/.exec(rel[0])?.[1];
+    const target = /\bTarget="([^"]*)"/.exec(rel[0])?.[1];
+    if (id && target) relMap.set(id, target.replace(/^\//, "").replace(/^xl\//, ""));
   }
-  const sheetTags = [...workbookXml.matchAll(/<sheet\b[^>]*?name="([^"]*)"[^>]*?r:id="([^"]*)"[^>]*\/?>/g)];
+  const sheetTags = [...workbookXml.matchAll(/<sheet\b[^>]*?\/?>/g)]
+    .map((match) => ({ name: /\bname="([^"]*)"/.exec(match[0])?.[1] ?? "", rid: /\br:id="([^"]*)"/.exec(match[0])?.[1] ?? "" }))
+    .filter((tag) => tag.rid);
   const fallback = Object.keys(files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name)).sort();
   const targets = sheetTags.length
-    ? sheetTags.map((tag) => ({ name: decodeXmlEntities(tag[1]), file: `xl/${relMap.get(tag[2]) ?? ""}` }))
+    ? sheetTags.map((tag) => ({ name: decodeXmlEntities(tag.name), file: `xl/${relMap.get(tag.rid) ?? ""}` }))
     : fallback.map((file, index) => ({ name: `Sheet${index + 1}`, file }));
   return targets
     .filter((target) => files[target.file])

@@ -1518,6 +1518,17 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
   const [masterDragging, setMasterDragging] = useState(false);
   const [masterBusy, setMasterBusy] = useState(false);
   const [masterFeedback, setMasterFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
+  const downloadProductMasterTemplate = () => {
+    // Exact headers the parser recognizes, with two example rows so the file is ready to fill.
+    const rows: (string | number)[][] = [
+      ["SKU", "EAN / GTIN", "Purchase price", "Logistic cost", "Other cost", "Price"],
+      ["SKU-0001", "4010000000017", 120, 15, 8, 299.99],
+      ["SKU-0002", "4010000000024", 95, 12.5, 6, 219],
+    ];
+    const workbook = createTabularWorkbook([{ name: "Product master", rows }], "Product master template", new Date().toISOString());
+    const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    const link = document.createElement("a"); link.href = url; link.download = "product-master-template.xlsx"; link.click(); URL.revokeObjectURL(url);
+  };
   const uploadProductMaster = async (file: File | undefined) => {
     if (!file || masterBusy) return;
     setMasterBusy(true);
@@ -1684,7 +1695,7 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
   return <>
     <div className="page-heading"><div><span className="eyebrow">Persistent source history · {marketplace.name}</span><h1>Data imports</h1><p>{marketplaceId === "kaufland_de" ? "Upload the same seven-report package for July, a single day, or month-to-date. Every refresh is retained; newer overlapping daily evidence is used for flexible ranges without deleting the older snapshot." : `Upload one complete ${marketplace.shortName} reporting period. Every valid snapshot and its raw files are retained for MoM, YoY and marketplace comparisons.`}</p></div><StatusPill tone="ready">{history.length} retained snapshot{history.length === 1 ? "" : "s"}</StatusPill></div>
     <section className="panel mapping-upload product-master-upload">
-      <div><span className="eyebrow">Bring your own catalog</span><h2>Product master upload</h2><p>Upload your own completed product master as <code>.xlsx</code> or <code>.csv</code> to drive the whole catalog — internal SKU, EAN, supplier, available price and cost. Contribution margin is derived from price and cost when a margin column is absent. Recognized headers include <code>Artikelnummer</code>/<code>SKU</code>, <code>EAN / GTIN</code>, <code>price</code>, <code>Letzter EK</code>, <code>Logistikkosten</code>, <code>Landed Cost</code> and <code>Firma / Lieferant</code>. The file is parsed and kept in your browser only — it is never sent to a server.</p></div>
+      <div><span className="eyebrow">Bring your own catalog</span><h2>Product master upload</h2><p>Download the template, fill it in and upload it back to drive the whole catalog. The six columns are <code>SKU</code>, <code>EAN / GTIN</code>, <code>Purchase price</code>, <code>Logistic cost</code>, <code>Other cost</code> and <code>Price</code>. Contribution margin is derived automatically as <em>(net price − purchase − logistic − other) ÷ net price</em>. The file is parsed and kept in your browser only — it is never sent to a server.</p><button type="button" className="secondary-button template-button" onClick={downloadProductMasterTemplate}><span aria-hidden="true">⇩</span> Download template (.xlsx)</button></div>
       <label className={`drop-zone compact ${masterDragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setMasterDragging(true); }} onDragOver={(event) => { event.preventDefault(); setMasterDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setMasterDragging(false); }} onDrop={(event) => { event.preventDefault(); setMasterDragging(false); void uploadProductMaster(event.dataTransfer.files?.[0]); }}>
         <input type="file" accept=".xlsx,.csv,.tsv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={masterBusy} onChange={(event) => { void uploadProductMaster(event.target.files?.[0]); event.target.value = ""; }} />
         <span className="drop-icon">⇧</span><strong>{masterBusy ? "Reading your product master…" : "Drop a product master (.xlsx or .csv)"}</strong><small>or click to choose a file · parsed and kept in your browser</small>
