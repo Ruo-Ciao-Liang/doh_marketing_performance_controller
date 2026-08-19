@@ -1493,6 +1493,52 @@ function EmptyMarketplace({ marketplaceId, onOpenImports }: { marketplaceId: Mar
   return <section className="panel empty-marketplace marketplace-onboarding"><span className="eyebrow">{definition.name}</span><h1>No retained snapshot yet</h1><p>Import one complete {definition.shortName} reporting package. Missing metrics will remain explicitly unavailable; no Amazon values or zeros are substituted.</p><div><button type="button" className="primary-button" onClick={onOpenImports}>Open {definition.shortName} imports</button><a href="https://www.kauflandglobalmarketplace.com/en/seller-university/your-performance/reports/" target="_blank" rel="noreferrer">View Kaufland report guidance →</a></div></section>;
 }
 
+// Shared product-master upload panel — the same catalog drives every marketplace, so
+// this is rendered on the Amazon/Kaufland, Allegro and eBay import pages alike.
+function ProductMasterUpload({ productMasterStats, onProductMaster, onClearProductMaster }: {
+  productMasterStats: ProductMasterStats | null;
+  onProductMaster: (products: CatalogProduct[], stats: ProductMasterStats) => void;
+  onClearProductMaster: () => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
+  const downloadTemplate = () => {
+    const rows: (string | number)[][] = [["SKU", "EAN / GTIN", "Purchase price", "Logistic cost", "Other cost", "Price"]];
+    const workbook = createTabularWorkbook([{ name: "Product master", rows }], "Product master template", new Date().toISOString(), "FF000000");
+    const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    const link = document.createElement("a"); link.href = url; link.download = "product-master-template.xlsx"; link.click(); URL.revokeObjectURL(url);
+  };
+  const upload = async (file: File | undefined) => {
+    if (!file || busy) return;
+    setBusy(true);
+    setFeedback({ tone: "warning", text: `Reading ${file.name}…` });
+    try {
+      const result = await parseProductMasterFile(file);
+      if (!result.products.length) { setFeedback({ tone: "error", text: result.warnings[0] ?? "No products could be read from this file." }); return; }
+      onProductMaster(result.products, result.stats);
+      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `${integer.format(result.stats.products)} products loaded from ${file.name}. ${integer.format(result.stats.withMargin)} have a contribution margin and ${integer.format(result.stats.withEan)} carry an EAN.${warningText}` });
+    } catch (error) {
+      setFeedback({ tone: "error", text: error instanceof Error ? error.message : "The product master could not be read." });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="panel mapping-upload product-master-upload">
+      <div><span className="eyebrow">Bring your own catalog</span><h2>Product master upload</h2><p>Download the template, fill it in and upload it back to drive the whole catalog. The six columns are <code>SKU</code>, <code>EAN / GTIN</code>, <code>Purchase price</code>, <code>Logistic cost</code>, <code>Other cost</code> and <code>Price</code>. Contribution margin is derived automatically as <em>(net price − purchase − logistic − other) ÷ net price</em>. One product master is shared across every marketplace and is parsed and kept in your browser only.</p><button type="button" className="secondary-button template-button" onClick={downloadTemplate}><span aria-hidden="true">⇩</span> Download template (.xlsx)</button></div>
+      <label className={`drop-zone compact ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void upload(event.dataTransfer.files?.[0]); }}>
+        <input type="file" accept=".xlsx,.csv,.tsv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} />
+        <span className="drop-icon">⇧</span><strong>{busy ? "Reading your product master…" : "Drop a product master (.xlsx or .csv)"}</strong><small>or click to choose a file · parsed and kept in your browser</small>
+      </label>
+      <div className="product-master-status"><StatusPill tone={productMasterStats ? "ready" : "quiet"}>{productMasterStats ? `${integer.format(productMasterStats.products)} products retained` : "Using the built-in demo catalog"}</StatusPill>{productMasterStats && <button type="button" className="text-button" onClick={onClearProductMaster}>Remove uploaded master</button>}</div>
+      {feedback && <div className={`import-feedback ${feedback.tone}`} role="status">{feedback.text}</div>}
+      {productMasterStats && <p className="mapping-feedback">Source: {productMasterStats.fileName} · {productMasterStats.format.toUpperCase()} · {integer.format(productMasterStats.withMargin)} with margin · {integer.format(productMasterStats.withCost)} with cost · {integer.format(productMasterStats.withEan)} with EAN{productMasterStats.duplicateSkus ? ` · ${integer.format(productMasterStats.duplicateSkus)} duplicate SKUs ignored` : ""}</p>}
+    </section>
+  );
+}
+
 function Imports({ history, currentSummary, marketplaceId = marketplaceSelectionGlobal === "all" ? "kaufland_de" : marketplaceSelectionGlobal, onImported, productMasterStats, onProductMaster, onClearProductMaster }: {
   history: SnapshotHistorySummary[];
   currentSummary: SnapshotHistorySummary;
@@ -1515,35 +1561,6 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
   const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
   const [mappingCount, setMappingCount] = useState(0);
   const [mappingFeedback, setMappingFeedback] = useState("");
-  const [masterDragging, setMasterDragging] = useState(false);
-  const [masterBusy, setMasterBusy] = useState(false);
-  const [masterFeedback, setMasterFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
-  const downloadProductMasterTemplate = () => {
-    // Clean template: just the exact headers the parser recognizes, no example rows.
-    const rows: (string | number)[][] = [["SKU", "EAN / GTIN", "Purchase price", "Logistic cost", "Other cost", "Price"]];
-    const workbook = createTabularWorkbook([{ name: "Product master", rows }], "Product master template", new Date().toISOString(), "FF000000");
-    const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
-    const link = document.createElement("a"); link.href = url; link.download = "product-master-template.xlsx"; link.click(); URL.revokeObjectURL(url);
-  };
-  const uploadProductMaster = async (file: File | undefined) => {
-    if (!file || masterBusy) return;
-    setMasterBusy(true);
-    setMasterFeedback({ tone: "warning", text: `Reading ${file.name}…` });
-    try {
-      const result = await parseProductMasterFile(file);
-      if (!result.products.length) {
-        setMasterFeedback({ tone: "error", text: result.warnings[0] ?? "No products could be read from this file." });
-        return;
-      }
-      onProductMaster(result.products, result.stats);
-      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
-      setMasterFeedback({ tone: result.warnings.length ? "warning" : "success", text: `${integer.format(result.stats.products)} products loaded from ${file.name}. ${integer.format(result.stats.withMargin)} have a contribution margin and ${integer.format(result.stats.withEan)} carry an EAN.${warningText}` });
-    } catch (error) {
-      setMasterFeedback({ tone: "error", text: error instanceof Error ? error.message : "The product master could not be read." });
-    } finally {
-      setMasterBusy(false);
-    }
-  };
   const [commissionRate, setCommissionRate] = useState("");
   const [feeRevision, setFeeRevision] = useState(0);
   const [feeConfirmed, setFeeConfirmed] = useState(false);
@@ -1690,16 +1707,7 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
     : null;
   return <>
     <div className="page-heading"><div><span className="eyebrow">Persistent source history · {marketplace.name}</span><h1>Data imports</h1><p>{marketplaceId === "kaufland_de" ? "Upload the same seven-report package for July, a single day, or month-to-date. Every refresh is retained; newer overlapping daily evidence is used for flexible ranges without deleting the older snapshot." : `Upload one complete ${marketplace.shortName} reporting period. Every valid snapshot and its raw files are retained for MoM, YoY and marketplace comparisons.`}</p></div><StatusPill tone="ready">{history.length} retained snapshot{history.length === 1 ? "" : "s"}</StatusPill></div>
-    <section className="panel mapping-upload product-master-upload">
-      <div><span className="eyebrow">Bring your own catalog</span><h2>Product master upload</h2><p>Download the template, fill it in and upload it back to drive the whole catalog. The six columns are <code>SKU</code>, <code>EAN / GTIN</code>, <code>Purchase price</code>, <code>Logistic cost</code>, <code>Other cost</code> and <code>Price</code>. Contribution margin is derived automatically as <em>(net price − purchase − logistic − other) ÷ net price</em>. The file is parsed and kept in your browser only — it is never sent to a server.</p><button type="button" className="secondary-button template-button" onClick={downloadProductMasterTemplate}><span aria-hidden="true">⇩</span> Download template (.xlsx)</button></div>
-      <label className={`drop-zone compact ${masterDragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setMasterDragging(true); }} onDragOver={(event) => { event.preventDefault(); setMasterDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setMasterDragging(false); }} onDrop={(event) => { event.preventDefault(); setMasterDragging(false); void uploadProductMaster(event.dataTransfer.files?.[0]); }}>
-        <input type="file" accept=".xlsx,.csv,.tsv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={masterBusy} onChange={(event) => { void uploadProductMaster(event.target.files?.[0]); event.target.value = ""; }} />
-        <span className="drop-icon">⇧</span><strong>{masterBusy ? "Reading your product master…" : "Drop a product master (.xlsx or .csv)"}</strong><small>or click to choose a file · parsed and kept in your browser</small>
-      </label>
-      <div className="product-master-status"><StatusPill tone={productMasterStats ? "ready" : "quiet"}>{productMasterStats ? `${integer.format(productMasterStats.products)} products retained` : "Using the built-in demo catalog"}</StatusPill>{productMasterStats && <button type="button" className="text-button" onClick={onClearProductMaster}>Remove uploaded master</button>}</div>
-      {masterFeedback && <div className={`import-feedback ${masterFeedback.tone}`} role="status">{masterFeedback.text}</div>}
-      {productMasterStats && <p className="mapping-feedback">Source: {productMasterStats.fileName} · {productMasterStats.format.toUpperCase()} · {integer.format(productMasterStats.withMargin)} with margin · {integer.format(productMasterStats.withCost)} with cost · {integer.format(productMasterStats.withEan)} with EAN{productMasterStats.duplicateSkus ? ` · ${integer.format(productMasterStats.duplicateSkus)} duplicate SKUs ignored` : ""}</p>}
-    </section>
+    <ProductMasterUpload productMasterStats={productMasterStats} onProductMaster={onProductMaster} onClearProductMaster={onClearProductMaster} />
     {marketplaceId === "kaufland_de" && <section className="panel mapping-upload"><div><span className="eyebrow">Optional identity enrichment</span><h2>Internal SKU ↔ EAN crosswalk</h2><p>The Account listing feed automatically joins <code>id_offer</code> to matching internal SKUs. Upload a crosswalk only for the remaining unmatched Kaufland offers. Required columns: <code>internal_sku</code> and <code>ean</code>; conflicts still block import.</p></div><label className="secondary-button">Choose optional mapping CSV<input type="file" accept=".csv,text/csv" onChange={(event) => void uploadMapping(event.target.files?.[0])} /></label><StatusPill tone={mappingCount ? "ready" : "quiet"}>{mappingCount ? `${mappingCount} identifiers retained` : "Auto-match enabled"}</StatusPill>{mappingFeedback && <p className="mapping-feedback">{mappingFeedback}</p>}</section>}
     {marketplaceId === "kaufland_de" && <section className="panel marketplace-fees"><div><span className="eyebrow">Marketplace cost settings</span><h2>Kaufland commission / provision</h2><p>Purchase and delivery costs remain sourced from the locked economics workbook. Profitability stays unavailable until this marketplace rate is confirmed.</p></div><label><span>Commission rate</span><div><input type="number" min="0" max="50" step="0.1" value={commissionRate} onChange={(event) => setCommissionRate(event.target.value)} /><b>%</b></div></label><button type="button" className="primary-button" onClick={() => void saveFees()}>Save marketplace fee</button><StatusPill tone={feeConfirmed ? "ready" : "partial"}>{feeConfirmed ? "Confirmed" : "Not confirmed"}</StatusPill>{feeFeedback && <p>{feeFeedback}</p>}</section>}
     <section className="import-upload-layout">
@@ -2174,10 +2182,13 @@ function clearStoredEbay() {
   try { window.localStorage.removeItem(EBAY_STORAGE_KEY); } catch { /* ignore */ }
 }
 
-function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, onImported, onClear }: {
+function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, productMasterStats, onProductMaster, onClearProductMaster, onImported, onClear }: {
   snapshot: AllegroSnapshot | null;
   marginCoverage: { matchedOffers: number; totalOffers: number };
   productMasterLoaded: boolean;
+  productMasterStats: ProductMasterStats | null;
+  onProductMaster: (products: CatalogProduct[], stats: ProductMasterStats) => void;
+  onClearProductMaster: () => void;
   onImported: (snapshot: AllegroSnapshot, fileNames: string[]) => void;
   onClear: () => void;
 }) {
@@ -2215,14 +2226,18 @@ function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, onImpor
       {snapshot && <div className="allegro-sources"><div className="allegro-sources-head"><StatusPill tone="ready">{snapshot.sources.length} report{snapshot.sources.length === 1 ? "" : "s"} loaded</StatusPill><button type="button" className="text-button" onClick={onClear}>Remove Allegro data</button></div><div className="import-grid">{snapshot.sources.map((source, index) => <article className="import-card" key={`${source.key}-${index}`}><div className="file-icon">{source.fileName.toLowerCase().endsWith(".csv") ? "CSV" : "XLSX"}</div><div className="import-main"><div><h3>{source.label}</h3><StatusPill tone="ready">{integer.format(source.rows)} rows</StatusPill></div><p title={source.fileName}>{source.fileName}</p><dl><div><dt>System role</dt><dd>{source.key}</dd></div></dl></div></article>)}</div></div>}
       <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.allegro_pl.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
     </section>
-    <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each Allegro offer to your uploaded product master — first by the Allegro Ads campaign name (which mirrors the internal SKU), then by the SKU appearing in the offer title. Unmatched offers stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedOffers > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedOffers)}/${integer.format(marginCoverage.totalOffers)} offers matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master on the Amazon <b>Data imports</b> tab (or switch to Amazon and upload it) whose SKUs match the Allegro campaign names, then the Net contribution margin card populates here too.</p>}</section>
+    <ProductMasterUpload productMasterStats={productMasterStats} onProductMaster={onProductMaster} onClearProductMaster={onClearProductMaster} />
+    <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each Allegro offer to your uploaded product master — first by the Allegro Ads campaign name (which mirrors the internal SKU), then by the SKU appearing in the offer title. Unmatched offers stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedOffers > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedOffers)}/${integer.format(marginCoverage.totalOffers)} offers matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master above whose SKUs match the Allegro campaign names, then the Net contribution margin card populates here too.</p>}</section>
   </>;
 }
 
-function EbayImports({ snapshot, marginCoverage, productMasterLoaded, onImported, onClear }: {
+function EbayImports({ snapshot, marginCoverage, productMasterLoaded, productMasterStats, onProductMaster, onClearProductMaster, onImported, onClear }: {
   snapshot: EbaySnapshot | null;
   marginCoverage: { matchedSkus: number; totalSkus: number };
   productMasterLoaded: boolean;
+  productMasterStats: ProductMasterStats | null;
+  onProductMaster: (products: CatalogProduct[], stats: ProductMasterStats) => void;
+  onClearProductMaster: () => void;
   onImported: (snapshot: EbaySnapshot, fileNames: string[]) => void;
   onClear: () => void;
 }) {
@@ -2260,7 +2275,8 @@ function EbayImports({ snapshot, marginCoverage, productMasterLoaded, onImported
       {snapshot && <div className="allegro-sources"><div className="allegro-sources-head"><StatusPill tone="ready">{snapshot.sources.length} report{snapshot.sources.length === 1 ? "" : "s"} loaded</StatusPill><button type="button" className="text-button" onClick={onClear}>Remove eBay data</button></div><div className="import-grid">{snapshot.sources.map((source, index) => <article className="import-card" key={`${source.key}-${index}`}><div className="file-icon">{source.fileName.toLowerCase().endsWith(".xlsx") ? "XLSX" : "CSV"}</div><div className="import-main"><div><h3>{source.label}</h3><StatusPill tone="ready">{integer.format(source.rows)} rows</StatusPill></div><p title={source.fileName}>{source.fileName}</p><dl><div><dt>System role</dt><dd>{source.key}</dd></div></dl></div></article>)}</div></div>}
       <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.ebay_de.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
     </section>
-    <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each ordered eBay SKU (custom label) to your uploaded product master. eBay SKUs match the internal SKU directly, with a trailing variant suffix stripped as a fallback. Unmatched SKUs stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedSkus > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedSkus)}/${integer.format(marginCoverage.totalSkus)} ordered SKUs matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master on the Amazon <b>Data imports</b> tab whose SKUs match the eBay custom labels, then the Net contribution margin card populates here too.</p>}</section>
+    <ProductMasterUpload productMasterStats={productMasterStats} onProductMaster={onProductMaster} onClearProductMaster={onClearProductMaster} />
+    <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each ordered eBay SKU (custom label) to your uploaded product master. eBay SKUs match the internal SKU directly, with a trailing variant suffix stripped as a fallback. Unmatched SKUs stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedSkus > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedSkus)}/${integer.format(marginCoverage.totalSkus)} ordered SKUs matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master above whose SKUs match the eBay custom labels, then the Net contribution margin card populates here too.</p>}</section>
   </>;
 }
 
@@ -2296,6 +2312,7 @@ export default function Home() {
   const [collaborationReady, setCollaborationReady] = useState(false);
   const [productMasterStats, setProductMasterStats] = useState<ProductMasterStats | null>(null);
   const productMasterRef = useRef<CatalogProduct[] | null>(null);
+  const [productMasterVersion, setProductMasterVersion] = useState(0);
   const [allegroSnapshot, setAllegroSnapshot] = useState<AllegroSnapshot | null>(null);
   const [allegroFx, setAllegroFx] = useState<number>(DEFAULT_PLN_EUR_RATE);
   const [allegroFileNames, setAllegroFileNames] = useState<string[]>([]);
@@ -2363,7 +2380,7 @@ export default function Home() {
     setEbayMarginCoverage({ matchedSkus: marginCoverage.matchedSkus, totalSkus: marginCoverage.totalSkus });
     setMarketplaceAvailable(true);
     setStorageStatus("ready");
-  }, [marketplaceSelection, ebaySnapshot]);
+  }, [marketplaceSelection, ebaySnapshot, productMasterVersion]);
   // Allegro flows through the same shared pages as Amazon/Kaufland: rebuild a standard
   // PLN-native snapshot from the Allegro reports (joined to the product master for margin)
   // whenever Allegro is active, the reports change, or the FX rate changes.
@@ -2378,7 +2395,7 @@ export default function Home() {
     setAllegroMarginCoverage({ matchedOffers: marginCoverage.matchedOffers, totalOffers: marginCoverage.totalOffers });
     setMarketplaceAvailable(true);
     setStorageStatus("ready");
-  }, [marketplaceSelection, allegroSnapshot, allegroFx]);
+  }, [marketplaceSelection, allegroSnapshot, allegroFx, productMasterVersion]);
   useEffect(() => {
     if (storageStatus !== "ready" || !marketplaceAvailable || marketplaceSelection === "all" || marketplaceSelection === "allegro_pl" || marketplaceSelection === "ebay_de") return;
     let active = true;
@@ -2576,10 +2593,16 @@ export default function Home() {
     setHistory(nextHistory);
     setStorageStatus("ready");
   };
+  const clientSideMarketplace = marketplaceSelection === "allegro_pl" || marketplaceSelection === "ebay_de";
+  const emptyBaseId = marketplaceSelection === "amazon_de" || marketplaceSelection === "kaufland_de" ? marketplaceSelection : "amazon_de";
   const applyProductMaster = (products: CatalogProduct[], stats: ProductMasterStats) => {
     productMasterRef.current = products;
     setProductMasterStats(stats);
     saveStoredProductMaster(products, stats);
+    setProductMasterVersion((version) => version + 1);
+    // Allegro/eBay rebuild from their own reports (which re-run the join) via the version
+    // dependency; Amazon/Kaufland use the catalog directly as their product list.
+    if (clientSideMarketplace) return;
     setRuntimeData((current) => applyCatalogToData(current, products));
     setMarketplaceAvailable(true);
   };
@@ -2587,7 +2610,9 @@ export default function Home() {
     productMasterRef.current = null;
     setProductMasterStats(null);
     clearStoredProductMaster();
-    setRuntimeData((current) => ({ ...current, catalogProducts: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).catalogProducts, products: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).products, quality: emptyMarketplaceData(marketplaceSelection === "all" ? "amazon_de" : marketplaceSelection).quality }));
+    setProductMasterVersion((version) => version + 1);
+    if (clientSideMarketplace) return;
+    setRuntimeData((current) => ({ ...current, catalogProducts: emptyMarketplaceData(emptyBaseId).catalogProducts, products: emptyMarketplaceData(emptyBaseId).products, quality: emptyMarketplaceData(emptyBaseId).quality }));
   };
   const applyAllegro = (snap: AllegroSnapshot, names: string[]) => {
     setAllegroSnapshot(snap);
@@ -2690,5 +2715,5 @@ export default function Home() {
     if (marketplaceSelection === "all") setMarketplaceSelection("kaufland_de");
     setPage("imports");
   };
-  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Allegro PL · złoty + euro</span><b>{currentSummary.periodStart ? `${displayDate(currentSummary.periodStart)} – ${displayDate(currentSummary.periodEnd)}` : "No Allegro period imported"}</b></div> : marketplaceSelection === "ebay_de" ? <div className="topbar-marketplace-label"><span className="eyebrow">eBay DE · EUR</span><b>{ebaySnapshot?.periodStart ? `${displayDate(ebaySnapshot.periodStart)} – ${displayDate(ebaySnapshot.periodEnd!)}` : "No eBay period imported"}</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection === "allegro_pl" && <label className="allegro-fx topbar-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={allegroFx} onChange={(event) => changeAllegroFx(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>}<a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a><SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{advertisingRange && page !== "dashboard" && marketplaceSelection !== "allegro_pl" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && (marketplaceSelection === "allegro_pl" ? <AllegroImports snapshot={allegroSnapshot} marginCoverage={allegroMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} onImported={applyAllegro} onClear={clearAllegro} /> : marketplaceSelection === "ebay_de" ? <EbayImports snapshot={ebaySnapshot} marginCoverage={ebayMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} onImported={applyEbay} onClear={clearEbay} /> : <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />)}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</div></main></div>;
+  return <div className={`app-shell sidebar-${sidebarPosition}`}><aside className="sidebar"><div className="brand"><span className="brand-mark">BC</span><div><b>Bid Control</b><small>Amazon DE</small></div></div><nav>{navItems.map((item) => <button key={item.key} className={page === item.key ? "active" : ""} onClick={() => setPage(item.key)}><span>{item.icon}</span>{item.label}{item.key === "suggestions" && <i>{buildSuggestions(data.targetPerformance, settings).filter((suggestion) => suggestion.type !== "hold").length}</i>}</button>)}</nav><div className="sidebar-footer"><div className="readonly-card"><span>◉</span><div><b>Recommendation only</b><small>No Amazon changes are made</small></div></div><button type="button" className="sidebar-position-button" onClick={moveSidebar} aria-label={`Move sidebar to the ${sidebarPosition === "left" ? "right" : "left"}`}><span>⇆</span> Move sidebar to {sidebarPosition === "left" ? "right" : "left"}</button><button onClick={() => setPage("knowledge")}><span>?</span> Help & glossary</button></div></aside><main className="main"><header className="topbar">{marketplaceSelection === "allegro_pl" ? <div className="topbar-marketplace-label"><span className="eyebrow">Allegro PL · złoty + euro</span><b>{currentSummary.periodStart ? `${displayDate(currentSummary.periodStart)} – ${displayDate(currentSummary.periodEnd)}` : "No Allegro period imported"}</b></div> : marketplaceSelection === "ebay_de" ? <div className="topbar-marketplace-label"><span className="eyebrow">eBay DE · EUR</span><b>{ebaySnapshot?.periodStart ? `${displayDate(ebaySnapshot.periodStart)} – ${displayDate(ebaySnapshot.periodEnd!)}` : "No eBay period imported"}</b></div> : <ReportingPeriodSelector history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} loading={periodLoading} ready={storageStatus === "ready"} error={periodError} onSelect={(snapshotId) => void selectReportingPeriod(snapshotId)} onSelectAdvertisingRange={(range) => void selectAdvertisingRange(range)} onMissing={setPeriodError} onOpenImports={() => setPage("imports")} />}<div className="top-actions">{marketplaceSelection === "allegro_pl" && <label className="allegro-fx topbar-fx"><span>1 PLN =</span><input type="number" min="0" step="0.001" value={allegroFx} onChange={(event) => changeAllegroFx(event.target.value)} aria-label="PLN to EUR rate" /><b>EUR</b></label>}<a className="export-all-button" href="/exports/amazon-bidding-control-all-data.xlsx" download={`amazon-bidding-control-${data.reporting.end}.xlsx`} onClick={(event) => { event.preventDefault(); exportAllData(); }} title="Download the complete active normalized snapshot as a multi-sheet Excel workbook."><span aria-hidden="true">⇩</span><span>Export all data</span></a><SaveIndicator status={overallSaveStatus} label="All changes saved" detail={currentUser ? `Signed in as ${currentUser.email}. Rules and reviews are shared; view preferences are personal.` : "Loading signed-in user"} /><span className={`refresh-status storage-${storageStatus}`} title={storageStatus === "offline" ? "Using the embedded baseline because persistent storage could not be reached." : "Historical snapshots are stored persistently."}><i /> {storageStatus === "loading" ? "Loading history" : storageStatus === "ready" ? "History retained" : "Baseline data"}</span><button className="icon-button" aria-label="Notifications">●</button><span className="avatar" title={currentUser?.displayName}>{userInitials}</span></div></header><div className="content">{advertisingRange && page !== "dashboard" && marketplaceSelection !== "allegro_pl" && <div className="advertising-scope-reminder"><div><b>Flexible range applies to advertising dashboard KPIs only</b><span>{displayDate(advertisingRange.reporting.start)} – {displayDate(advertisingRange.reporting.end)} · This page still uses the complete {displayDate(currentSummary.periodStart)} – {displayDate(currentSummary.periodEnd)} snapshot.</span></div><button type="button" onClick={() => setPage("dashboard")}>Open advertising view →</button></div>}{page === "dashboard" && <Dashboard onNavigate={setPage} history={history} currentSummary={currentSummary} advertisingRange={advertisingRange} />}{page === "comparisons" && <KpiComparisons history={history} currentSummary={currentSummary} onNavigate={setPage} />}{page === "suggestions" && <Suggestions settings={settings} reviews={reviews} reviewSaveStatus={reviewSaveStatus} onDecision={changeReview} preferences={preferences.suggestions} onPreferencesChange={(value) => changePreferences("suggestions", value)} />}{page === "products" && <Products preferences={preferences.products} onPreferencesChange={(value) => changePreferences("products", value)} />}{page === "ranking" && <ProductRanking preferences={preferences.ranking} onPreferencesChange={(value) => changePreferences("ranking", value)} />}{page === "imports" && (marketplaceSelection === "allegro_pl" ? <AllegroImports snapshot={allegroSnapshot} marginCoverage={allegroMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} onImported={applyAllegro} onClear={clearAllegro} /> : marketplaceSelection === "ebay_de" ? <EbayImports snapshot={ebaySnapshot} marginCoverage={ebayMarginCoverage} productMasterLoaded={Boolean(productMasterRef.current?.length)} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} onImported={applyEbay} onClear={clearEbay} /> : <Imports history={history} currentSummary={currentSummary} onImported={applyImportedSnapshot} productMasterStats={productMasterStats} onProductMaster={applyProductMaster} onClearProductMaster={clearProductMaster} />)}{page === "rules" && <Rules settings={settings} onSettingsChange={changeSettings} saveStatus={settingsSaveStatus} updatedAt={settingsUpdatedAt} updatedBy={settingsUpdatedBy} />}{page === "knowledge" && <KnowledgeAssistant settings={settings} />}{page === "history" && <History history={history} currentSummary={currentSummary} audit={audit} />}</div></main></div>;
 }
