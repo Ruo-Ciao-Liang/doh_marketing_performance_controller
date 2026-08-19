@@ -1,0 +1,17 @@
+# Render Blueprint — deploys the Marketplace Performance Controller as a public web
+# service. All marketplace uploads stay in each visitor's browser (localStorage); the
+# optional Amazon/Kaufland server-side snapshot store (D1/R2) is not present here, so
+# those two show "Baseline data" while every client-side feature works.
+services:
+  - type: web
+    name: marketplace-performance-controller
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: corepack enable && corepack prepare pnpm@11.9.0 --activate && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm start
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.13.0"
