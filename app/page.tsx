@@ -24,6 +24,7 @@ import { comparableSnapshot, comparisonTargetDate, percentageChange } from "@/li
 import { comparableMetrics, rankComparisonRows, type ComparableMetricKey, type MarketplaceComparisonRow } from "@/lib/marketplace-comparison";
 import { marketplaceRegistry, type MarketplaceId, type MarketplaceSelection } from "@/lib/marketplaces";
 import { parseProductMasterFile, type CatalogProduct, type ProductMasterStats } from "@/lib/product-master-import";
+import { parseErpSalesFile, type ErpSalesRow, type ErpSalesStats } from "@/lib/erp-sales-import";
 import { parseAllegroFiles, type AllegroSnapshot } from "@/lib/allegro-import";
 import { buildAllegroDashboardData } from "@/lib/allegro-dashboard";
 import { parseEbayFiles, type EbaySnapshot } from "@/lib/ebay-import";
@@ -1539,6 +1540,67 @@ function ProductMasterUpload({ productMasterStats, onProductMaster, onClearProdu
   );
 }
 
+// Required ERP sales summary — one file per marketplace (retail sales by SKU from the
+// ERP). Parsed and kept in the browser per marketplace; matched to the product master
+// by SKU. Does not yet drive dashboard totals (follow-up), but is part of the package.
+function loadStoredErpSales(marketplaceId: MarketplaceId): { rows: ErpSalesRow[]; stats: ErpSalesStats } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(`mpc:erp-sales:${marketplaceId}:v1`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { rows?: ErpSalesRow[]; stats?: ErpSalesStats };
+    if (!parsed.rows || !parsed.stats) return null;
+    return { rows: parsed.rows, stats: parsed.stats };
+  } catch { return null; }
+}
+
+function ErpSalesUpload({ marketplaceId }: { marketplaceId: MarketplaceId }) {
+  const stored = useMemo(() => loadStoredErpSales(marketplaceId), [marketplaceId]);
+  const catalogSkus = useMemo(() => new Set((loadStoredProductMaster()?.products ?? []).map((product) => (product.canonicalSku ?? product.sku))), []);
+  const [rows, setRows] = useState<ErpSalesRow[]>(stored?.rows ?? []);
+  const [stats, setStats] = useState<ErpSalesStats | null>(stored?.stats ?? null);
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
+  const matched = rows.filter((row) => catalogSkus.has(row.sku)).length;
+
+  const downloadTemplate = () => {
+    const templateRows: (string | number)[][] = [["SKU", "Period start", "Period end", "Units sold", "Net revenue", "Gross revenue"]];
+    const workbook = createTabularWorkbook([{ name: "ERP sales summary", rows: templateRows }], "ERP sales summary template", new Date().toISOString(), "FF000000");
+    const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    const link = document.createElement("a"); link.href = url; link.download = `erp-sales-summary-template-${marketplaceId}.xlsx`; link.click(); URL.revokeObjectURL(url);
+  };
+  const upload = async (file: File | undefined) => {
+    if (!file || busy) return;
+    setBusy(true);
+    setFeedback({ tone: "warning", text: `Reading ${file.name}…` });
+    try {
+      const result = await parseErpSalesFile(file);
+      if (!result.rows.length) { setFeedback({ tone: "error", text: result.warnings[0] ?? "No sales rows could be read from this file." }); return; }
+      setRows(result.rows); setStats(result.stats);
+      try { window.localStorage.setItem(`mpc:erp-sales:${marketplaceId}:v1`, JSON.stringify({ rows: result.rows, stats: result.stats })); } catch { /* quota */ }
+      const warningText = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setFeedback({ tone: result.warnings.length ? "warning" : "success", text: `${integer.format(result.stats.rows)} sales rows loaded from ${file.name}. ${integer.format(result.stats.withRevenue)} carry revenue.${warningText}` });
+    } catch (error) {
+      setFeedback({ tone: "error", text: error instanceof Error ? error.message : "The ERP sales summary could not be read." });
+    } finally { setBusy(false); }
+  };
+  const clear = () => { setRows([]); setStats(null); try { window.localStorage.removeItem(`mpc:erp-sales:${marketplaceId}:v1`); } catch { /* ignore */ } };
+
+  return (
+    <section className="panel mapping-upload product-master-upload">
+      <div><span className="eyebrow">Required · from your ERP</span><h2>ERP sales summary</h2><p>Upload your ERP sales summary for {marketplaceRegistry[marketplaceId].name} — one file per marketplace, replacing the marketplace's own sales report. Download the template and fill it in. The columns are <code>SKU</code>, <code>Period start</code>, <code>Period end</code>, <code>Units sold</code>, <code>Net revenue</code> and <code>Gross revenue</code>. Parsed and kept in your browser only.</p><button type="button" className="secondary-button template-button" onClick={downloadTemplate}><span aria-hidden="true">⇩</span> Download template (.xlsx)</button></div>
+      <label className={`drop-zone compact ${dragging ? "dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void upload(event.dataTransfer.files?.[0]); }}>
+        <input type="file" accept=".xlsx,.csv,.tsv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} />
+        <span className="drop-icon">⇧</span><strong>{busy ? "Reading your ERP sales summary…" : "Drop the ERP sales summary (.xlsx or .csv)"}</strong><small>or click to choose a file · parsed and kept in your browser</small>
+      </label>
+      <div className="product-master-status"><StatusPill tone={stats ? "ready" : "quiet"}>{stats ? `${integer.format(stats.rows)} sales rows retained` : "Required — not uploaded yet"}</StatusPill>{stats && <button type="button" className="text-button" onClick={clear}>Remove ERP sales summary</button>}</div>
+      {feedback && <div className={`import-feedback ${feedback.tone}`} role="status">{feedback.text}</div>}
+      {stats && <p className="mapping-feedback">Source: {stats.fileName} · {stats.format.toUpperCase()} · {integer.format(stats.withRevenue)} with revenue · {catalogSkus.size ? `${integer.format(matched)} of ${integer.format(stats.rows)} SKUs matched to the product master` : "upload a product master to see SKU matches"}</p>}
+    </section>
+  );
+}
+
 function Imports({ history, currentSummary, marketplaceId = marketplaceSelectionGlobal === "all" ? "kaufland_de" : marketplaceSelectionGlobal, onImported, productMasterStats, onProductMaster, onClearProductMaster }: {
   history: SnapshotHistorySummary[];
   currentSummary: SnapshotHistorySummary;
@@ -1708,6 +1770,7 @@ function Imports({ history, currentSummary, marketplaceId = marketplaceSelection
   return <>
     <div className="page-heading"><div><span className="eyebrow">Persistent source history · {marketplace.name}</span><h1>Data imports</h1><p>{marketplaceId === "kaufland_de" ? "Upload the same seven-report package for July, a single day, or month-to-date. Every refresh is retained; newer overlapping daily evidence is used for flexible ranges without deleting the older snapshot." : `Upload one complete ${marketplace.shortName} reporting period. Every valid snapshot and its raw files are retained for MoM, YoY and marketplace comparisons.`}</p></div><StatusPill tone="ready">{history.length} retained snapshot{history.length === 1 ? "" : "s"}</StatusPill></div>
     <ProductMasterUpload productMasterStats={productMasterStats} onProductMaster={onProductMaster} onClearProductMaster={onClearProductMaster} />
+    <ErpSalesUpload key={marketplaceId} marketplaceId={marketplaceId} />
     {marketplaceId === "kaufland_de" && <section className="panel mapping-upload"><div><span className="eyebrow">Optional identity enrichment</span><h2>Internal SKU ↔ EAN crosswalk</h2><p>The Account listing feed automatically joins <code>id_offer</code> to matching internal SKUs. Upload a crosswalk only for the remaining unmatched Kaufland offers. Required columns: <code>internal_sku</code> and <code>ean</code>; conflicts still block import.</p></div><label className="secondary-button">Choose optional mapping CSV<input type="file" accept=".csv,text/csv" onChange={(event) => void uploadMapping(event.target.files?.[0])} /></label><StatusPill tone={mappingCount ? "ready" : "quiet"}>{mappingCount ? `${mappingCount} identifiers retained` : "Auto-match enabled"}</StatusPill>{mappingFeedback && <p className="mapping-feedback">{mappingFeedback}</p>}</section>}
     {marketplaceId === "kaufland_de" && <section className="panel marketplace-fees"><div><span className="eyebrow">Marketplace cost settings</span><h2>Kaufland commission / provision</h2><p>Purchase and delivery costs remain sourced from the locked economics workbook. Profitability stays unavailable until this marketplace rate is confirmed.</p></div><label><span>Commission rate</span><div><input type="number" min="0" max="50" step="0.1" value={commissionRate} onChange={(event) => setCommissionRate(event.target.value)} /><b>%</b></div></label><button type="button" className="primary-button" onClick={() => void saveFees()}>Save marketplace fee</button><StatusPill tone={feeConfirmed ? "ready" : "partial"}>{feeConfirmed ? "Confirmed" : "Not confirmed"}</StatusPill>{feeFeedback && <p>{feeFeedback}</p>}</section>}
     <section className="import-upload-layout">
@@ -2227,6 +2290,7 @@ function AllegroImports({ snapshot, marginCoverage, productMasterLoaded, product
       <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.allegro_pl.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
     </section>
     <ProductMasterUpload productMasterStats={productMasterStats} onProductMaster={onProductMaster} onClearProductMaster={onClearProductMaster} />
+    <ErpSalesUpload marketplaceId="allegro_pl" />
     <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each Allegro offer to your uploaded product master — first by the Allegro Ads campaign name (which mirrors the internal SKU), then by the SKU appearing in the offer title. Unmatched offers stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedOffers > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedOffers)}/${integer.format(marginCoverage.totalOffers)} offers matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master above whose SKUs match the Allegro campaign names, then the Net contribution margin card populates here too.</p>}</section>
   </>;
 }
@@ -2276,6 +2340,7 @@ function EbayImports({ snapshot, marginCoverage, productMasterLoaded, productMas
       <div className="allegro-required"><span className="eyebrow">Recognized files</span><div className="upload-requirements">{marketplaceRegistry.ebay_de.importRequirements.map((item, index) => <div className={`upload-requirement${item.optional ? " optional" : ""}`} key={item.role}><span>{item.optional ? "+" : index + 1}</span><div><b>{item.title} <em>{item.optional ? "Optional" : item.cadence}</em></b><small>{item.description}</small></div></div>)}</div></div>
     </section>
     <ProductMasterUpload productMasterStats={productMasterStats} onProductMaster={onProductMaster} onClearProductMaster={onClearProductMaster} />
+    <ErpSalesUpload marketplaceId="ebay_de" />
     <section className="panel allegro-margin-note"><div className="panel-heading"><div><span className="eyebrow">Contribution margin</span><h2>Product master join</h2><p>Contribution margin is computed by matching each ordered eBay SKU (custom label) to your uploaded product master. eBay SKUs match the internal SKU directly, with a trailing variant suffix stripped as a fallback. Unmatched SKUs stay outside the margin calculation.</p></div><StatusPill tone={productMasterLoaded ? (marginCoverage.matchedSkus > 0 ? "ready" : "partial") : "quiet"}>{productMasterLoaded ? `${integer.format(marginCoverage.matchedSkus)}/${integer.format(marginCoverage.totalSkus)} ordered SKUs matched` : "No product master uploaded"}</StatusPill></div>{!productMasterLoaded && <p className="allegro-note">Upload a product master above whose SKUs match the eBay custom labels, then the Net contribution margin card populates here too.</p>}</section>
   </>;
 }

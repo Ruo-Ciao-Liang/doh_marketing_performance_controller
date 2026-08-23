@@ -63,7 +63,6 @@ export const marketplaceRegistry: Record<MarketplaceId, MarketplaceDefinition> =
       { role: "campaign", title: "Campaign", cadence: "summary", description: "Campaign settings and reconciliation." },
       { role: "placement", title: "Placement", cadence: "daily", description: "Performance by placement." },
       { role: "targeting", title: "Targeting", cadence: "daily", description: "Targets, verified bids and recommendation evidence." },
-      { role: "business_report", title: "Business Report", cadence: "summary", description: "Retail revenue, units, sessions and conversion." },
       { role: "search_term_summary", title: "Search Term", cadence: "summary", description: "Optional reconciliation; never added to totals.", optional: true },
     ],
   },
