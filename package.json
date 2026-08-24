@@ -9,6 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
+    "deploy": "vinext build && wrangler deploy -c dist/server/wrangler.json",
     "import:data": "python scripts/import_data.py",
     "data:check": "python scripts/import_data.py --check",
     "test:rules": "node --experimental-strip-types --test lib/rules-engine.test.ts lib/review-export.test.ts lib/all-data-export.test.ts lib/suggestion-view.test.ts lib/product-ranking.test.ts lib/product-comparison.test.ts lib/product-contribution.test.ts lib/data-assistant.test.ts lib/runtime-import.test.ts lib/marketplace-comparison.test.ts lib/kaufland-import.test.ts",
